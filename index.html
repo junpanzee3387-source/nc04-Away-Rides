@@ -4,14 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NC04 Away Rides ～配車メーカー～</title>
-<link rel="manifest" href="manifest.json">
-<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
-<meta name="theme-color" content="#152A3D">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="配車メーカー">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Zen+Kaku+Gothic+New:wght@500;700;900&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -967,6 +959,12 @@ function allPeopleList(){
   });
   return list;
 }
+/* 座席の表示名：名前だけを表示する（旧バージョンで保存された履歴に残る「（父）／（母）／（コーチ）」等の続柄・役割表記は表示時に取り除く） */
+function seatDisplayName(seat){
+  if (!seat) return '';
+  if (seat.kind==='staff' && seat.personName) return seat.personName;
+  return String(seat.label==null?'':seat.label).replace(/（(父|母|監督|会長|指導者|コーチ|サポートコーチ)）\s*$/,'');
+}
 function escapeHtml(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* =========================================================
@@ -1721,7 +1719,7 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
   const staffToPlace = staff.filter(s=>{
     const sa = staffAttendance[s.name];
     return !!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival);
-  }).map(s=>({key:'staff-'+s.name, label:`${s.name}（${s.role}）`, kind:'staff', surname:null, personName:s.name}));
+  }).map(s=>({key:'staff-'+s.name, label:`${s.name}`, kind:'staff', surname:null, personName:s.name}));
 
   // 総務担当の保護者（前川母・本多母など）を「役員・指導者車に乗せる候補」として抽出する。
   // ▼今回の改修：この抽出は「今回のイベントで実際に役員・指導者車を使用する場合」に限る。
@@ -1733,10 +1731,10 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
       const a = attendanceFor(attendance, f);
       if (!a || a.localArrival) return;
       if (a.father && f.father && f.father.isOfficer && !seatedKeys.has(`${familyIdentity(f)}-father`) && !linkedRideExclusions.has(`${familyIdentity(f)}|father`)){
-        officerParents.push({key:`${familyIdentity(f)}-father`, label:`${f.father.name}（父）`, kind:'parent', gender:'father', surname:f.surname, personName:f.father.name, isOfficerParent:true});
+        officerParents.push({key:`${familyIdentity(f)}-father`, label:`${f.father.name}`, kind:'parent', gender:'father', surname:f.surname, personName:f.father.name, isOfficerParent:true});
       }
       if (a.mother && f.mother && f.mother.isOfficer && !seatedKeys.has(`${familyIdentity(f)}-mother`) && !linkedRideExclusions.has(`${familyIdentity(f)}|mother`)){
-        officerParents.push({key:`${familyIdentity(f)}-mother`, label:`${f.mother.name}（母）`, kind:'parent', gender:'mother', surname:f.surname, personName:f.mother.name, isOfficerParent:true});
+        officerParents.push({key:`${familyIdentity(f)}-mother`, label:`${f.mother.name}`, kind:'parent', gender:'mother', surname:f.surname, personName:f.mother.name, isOfficerParent:true});
       }
     });
   }
@@ -1770,10 +1768,10 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
     const a = attendanceFor(attendance, f);
     if (!a || a.localArrival) return;
     if (a.father && !seatedKeys.has(`${familyIdentity(f)}-father`) && !officerClaimedKeys.has(`${familyIdentity(f)}-father`) && !linkedRideExclusions.has(`${familyIdentity(f)}|father`)){
-      remainingParents.push({key:`${familyIdentity(f)}-father`, label:`${f.father?f.father.name:'(父・未登録)'}（父）`, kind:'parent', gender:'father', surname:f.surname, personName:f.father?f.father.name:null});
+      remainingParents.push({key:`${familyIdentity(f)}-father`, label:`${f.father?f.father.name:'(父・未登録)'}`, kind:'parent', gender:'father', surname:f.surname, personName:f.father?f.father.name:null});
     }
     if (a.mother && !seatedKeys.has(`${familyIdentity(f)}-mother`) && !officerClaimedKeys.has(`${familyIdentity(f)}-mother`) && !linkedRideExclusions.has(`${familyIdentity(f)}|mother`)){
-      remainingParents.push({key:`${familyIdentity(f)}-mother`, label:`${f.mother?f.mother.name:'(母・未登録)'}（母）`, kind:'parent', gender:'mother', surname:f.surname, personName:f.mother?f.mother.name:null});
+      remainingParents.push({key:`${familyIdentity(f)}-mother`, label:`${f.mother?f.mother.name:'(母・未登録)'}`, kind:'parent', gender:'mother', surname:f.surname, personName:f.mother?f.mother.name:null});
     }
     (f.players||[]).forEach((pl,idx)=>{
       const k = 'p'+idx;
@@ -2379,7 +2377,7 @@ function renderAssignment(){
         </select>
       ` : `<span class="kindtag">運転手</span>`;
       const kindLabel = {driver:'運転手',parent:'保護者',player:'選手',staff:'スタッフ',sibling:'兄弟姉妹'}[seat.kind]||'';
-      return `<div class="seat-row"><span>${escapeHtml(seat.label)} <span class="kindtag">${kindLabel}</span></span>${moveControl}</div>`;
+      return `<div class="seat-row"><span>${escapeHtml(seatDisplayName(seat))} <span class="kindtag">${kindLabel}</span></span>${moveControl}</div>`;
     }).join('');
     // 初期設定では役員・指導者車（総務車両）だが、今回は一般車として使用する車両は
     // その理由が一目で分かるよう、車名の下に短い注記を出す（画面は複雑にしない）。
@@ -2440,7 +2438,7 @@ function renderAssignment(){
 
   const unassignedHtml = r.unassigned.map(p=>`
     <div class="seat-row">
-      <span>${escapeHtml(p.label)} <span class="kindtag">${p.kind==='player'?'選手':p.kind==='staff'?'役員・指導者':p.kind==='sibling'?'兄弟姉妹':'保護者'}</span></span>
+      <span>${escapeHtml(seatDisplayName(p))} <span class="kindtag">${p.kind==='player'?'選手':p.kind==='staff'?'役員・指導者':p.kind==='sibling'?'兄弟姉妹':'保護者'}</span></span>
       <select data-action="move-seat" data-from="__unassigned__" data-seatkey="${escapeHtml(p.key)}" style="width:auto;font-size:12px;padding:3px 5px;">
         <option value="">配車先を選択</option>
         ${carSelectOptions(r.cars, null)}
@@ -2804,7 +2802,7 @@ function buildExportHtml(d, r){
   const carsHtml = r.cars.map((car, carIdx)=>{
     const seatsHtml = orderSeatsForDisplay(car.seats).map(seat=>{
       const kindLabel = {driver:'運転手',parent:'保護者',player:'選手',staff:'スタッフ',sibling:'兄弟姉妹'}[seat.kind]||'';
-      return `<div class="export-seat"><span>${escapeHtml(seat.label)}</span><span class="role">${kindLabel}</span></div>`;
+      return `<div class="export-seat"><span>${escapeHtml(seatDisplayName(seat))}</span><span class="role">${kindLabel}</span></div>`;
     }).join('');
     return `
     <div class="export-car">
@@ -4656,7 +4654,7 @@ ${ranked.map((sn,i)=>`${i+1}. ${sn}家（過去${(rotation[sn]||{}).count||0}回
           const pf = familyBySurname(sn);
           if (!pf) return;
           const nm = role==='father' ? (pf.father?pf.father.name:'') : (pf.mother?pf.mother.name:'');
-          seats.push({key:`${sn}-${role}`, label:`${nm}（${role==='father'?'父':'母'}）`, kind:'parent', surname:sn, gender:role, personName:nm});
+          seats.push({key:`${sn}-${role}`, label:`${nm}`, kind:'parent', surname:sn, gender:role, personName:nm});
         });
         (c.passengerPlayers||[]).filter(Boolean).forEach(key=>{
           const parts = key.split('|');
@@ -4672,7 +4670,7 @@ ${ranked.map((sn,i)=>`${i+1}. ${sn}家（過去${(rotation[sn]||{}).count||0}回
           const name = parts[1];
           const st = state.staff.find(s=>s.name===name);
           if (!st) return;
-          seats.push({key:'staff-'+st.name, label:`${st.name}（${st.role}）`, kind:'staff', surname:null, personName:st.name});
+          seats.push({key:'staff-'+st.name, label:`${st.name}`, kind:'staff', surname:null, personName:st.name});
         });
         cars.push({id:uid('car'), familyId:fam.id, type:c.carType||'general', familySurname:fam.surname, driverRole:c.driverRole, capacity:fam.capacity, seats});
       });
