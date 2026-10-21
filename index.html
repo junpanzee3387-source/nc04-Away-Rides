@@ -1547,8 +1547,9 @@ function chooseDispatchPlan(d, historyCounts, coRideCounts, relaxedRules={}){
         const i=rotation[sn]||{count:0,last:-1};
         return sum + i.count*1000 + (i.last+1);
       },0);
-      if (!best || carCount<best.carCount || (carCount===best.carCount && rotationPenalty<best.rotationPenalty)){
-        best={selectedSurnames:selected, result:trial, carCount, rotationPenalty};
+      const pv = trial.prefViolations || 0;
+      if (!best || carCount<best.carCount || (carCount===best.carCount && (pv<best.pv || (pv===best.pv && rotationPenalty<best.rotationPenalty)))){
+        best={selectedSurnames:selected, result:trial, carCount, rotationPenalty, pv};
       }
     }
     if (best) break;
@@ -1598,7 +1599,9 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
   function prefWeight(key){
     if (!preferences.enabled) return 0;
     const it = preferences.items[key];
-    if (!it || !it.checked || !it.priority) return 0;
+    if (!it || !it.checked) return 0;
+    // 優先度を選ばずにチェックだけ入れた場合も、設定が無効にならないよう2位相当で扱う
+    if (!it.priority) return 20;
     // 1位が2位・3位を合計しても上回るように差をつけ、優先順位の逆転が
     // 起きないようにする（1位＞2位＋3位の合計、を常に満たす重み）
     return {1:100, 2:20, 3:4}[it.priority] || 0;
@@ -1889,8 +1892,8 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
         if (bWouldCreateNew && motherOnlyCarsCount()>=1) sb -= 1000;
         if (!motherOnlyOk){
           // 「避ける」設定の場合は、1台目の母のみ車もできる限り避ける（軽い減点）
-          if (genderCount(a,'father')===0) sa -= 8;
-          if (genderCount(b,'father')===0) sb -= 8;
+          if (genderCount(a,'father')===0) sa -= 20;
+          if (genderCount(b,'father')===0) sb -= 20;
         }
       }
       if (sa!==sb) return sb-sa;
@@ -1999,9 +2002,78 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
     seatedKeys.add(p.key);
   }
 
+
+  // 【配慮設定の最終調整】保護者を1人ずつ順番に置く方式では、後から置く人ほど
+  // 選択肢が残らず、また repairLoneOccupants() の補正も配慮設定を見ずに保護者を
+  // 動かすため、設定どおりにならなかった。全員の配置が終わった後に、車をまたいだ
+  // 保護者の入れ替え／移動を試し、配慮設定の違反が減る場合だけ採用する。
+  // 各車の保護者人数は変わらない（移動は2名以上残る場合のみ）ので、絶対条件は崩れない。
+  function optimizeParentPlacement(){
+    const mixedOn = !!(preferences.items.avoidMixedGender && preferences.items.avoidMixedGender.checked);
+    const wM = mixedOn ? (wAvoidMixed || 20) : 0;
+    const wO = motherOnlyOk ? 0 : 20;
+    const wC = wCouple, wPC = wParentChild;
+    if (!wM && !wO && !wC && !wPC) return;
+    const isP = s=>s.kind==='driver'||s.kind==='parent';
+    const cs = allSeatCars.filter(c=>c.type!=='officer');
+    function carCost(c){
+      const ps = c.seats.filter(isP);
+      let cost = 0;
+      if (wM){
+        ps.filter(s=>s.gender==='father').forEach(f=>ps.filter(s=>s.gender==='mother').forEach(m=>{ if (f.surname!==m.surname) cost += wM; }));
+      }
+      if (wO && ps.length && !ps.some(s=>s.gender==='father')) cost += wO;
+      if (wC){
+        new Set(ps.map(s=>s.surname)).forEach(sn=>{
+          if (ps.some(s=>s.surname===sn&&s.gender==='father') && ps.some(s=>s.surname===sn&&s.gender==='mother')) cost -= wC;
+        });
+      }
+      if (wPC) c.seats.filter(s=>s.kind==='player').forEach(pl=>{ if (ps.some(s=>s.surname===pl.surname)) cost -= wPC; });
+      return cost;
+    }
+    function carOk(c){ return c.seats.every(s=>s.kind!=='sibling' || c.seats.some(p=>isP(p)&&p.surname===s.surname)); }
+    const movable = c=>c.seats.filter(s=>s.kind==='parent' && !s.isOfficerParent);
+    function tryImprove(){
+      for (const A of cs) for (const B of cs){
+        if (A===B) continue;
+        for (const sa of movable(A)){
+          // 移動（Aに保護者が2名以上残り、Bに空きがある場合のみ）
+          if ((parentCount(A)-1>=2 || relaxedRules.parentMin2) && seatsLeft(B)>0){
+            const before = carCost(A)+carCost(B);
+            A.seats = A.seats.filter(s=>s!==sa); B.seats.push(sa);
+            if (carCost(A)+carCost(B) < before && carOk(A) && carOk(B)) return true;
+            B.seats.pop(); A.seats.push(sa);
+          }
+          for (const sb of movable(B)){
+            if (sa.surname===sb.surname && sa.gender===sb.gender) continue;
+            const before = carCost(A)+carCost(B);
+            const ia = A.seats.indexOf(sa), ib = B.seats.indexOf(sb);
+            A.seats[ia] = sb; B.seats[ib] = sa;
+            if (carCost(A)+carCost(B) < before && carOk(A) && carOk(B)) return true;
+            A.seats[ia] = sa; B.seats[ib] = sb;
+          }
+        }
+      }
+      return false;
+    }
+    let g = 0;
+    while (g++ < 200 && tryImprove()){}
+    // それでも満たせない配慮が残る場合は、理由がわかるよう配車表の注意書きに出す
+    cs.forEach(c=>{
+      const ps = c.seats.filter(isP);
+      if (wM && ps.some(f=>f.gender==='father' && ps.some(m=>m.gender==='mother' && m.surname!==f.surname))){
+        warnings.push(`【配慮設定】${c.familySurname}号車に、夫婦以外の異性の保護者が同乗しています（参加者・車の組合せ上、避けられませんでした）。`);
+      }
+      if (wO && ps.length && !ps.some(s=>s.gender==='father')){
+        warnings.push(`【配慮設定】${c.familySurname}号車が母のみの車になっています（参加者・車の組合せ上、避けられませんでした）。`);
+      }
+    });
+  }
+
   // 【絶対条件・第一優先】保護者（運転手含む）が1名だけ／選手が1名だけの車が
   // 出ないよう、車両をまたいで座席を調整する（車両そのものは動かさない）
   repairLoneOccupants(allSeatCars, relaxedRules);
+  optimizeParentPlacement();
 
   // 上記の調整だけではどうしても解消できない場合、絶対条件に違反した状態のまま
   // 配車表に載せるのではなく、対象者を「未配置」として扱う（＝乗車が足りない
@@ -2125,7 +2197,8 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
     return !!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival && !sa.pickupByOther);
   }).map(s=>s.name);
 
-  return {cars, unassigned, warnings, localArrivalFamilies, heldBackFamilies, transportFamilies,
+  const prefViolations = warnings.filter(w=>w.indexOf('【配慮設定】')===0).length;
+  return {prefViolations, cars, unassigned, warnings, localArrivalFamilies, heldBackFamilies, transportFamilies,
     officerCarActive, localArrivalStaff, staffPickup, staffHeldBack};
 }
 
