@@ -329,6 +329,22 @@
   .rank-bar{height:6px;border-radius:3px;background:#E4DDBF;overflow:hidden;}
   .rank-bar span{display:block;height:100%;background:var(--field);}
 
+
+  /* ---------- 配車表プレビュー（画像出力の確認用オーバーレイ） ---------- */
+  .preview-overlay{
+    position:fixed;inset:0;z-index:400;background:rgba(10,22,32,0.85);
+    display:flex;flex-direction:column;
+  }
+  .preview-bar{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+    padding:10px 12px;background:var(--bar);color:var(--on-bar);
+  }
+  .preview-title{font-weight:700;font-size:14px;}
+  .preview-actions{display:flex;gap:8px;}
+  .preview-actions .btn.ghost{color:var(--on-bar);border-color:rgba(255,255,255,.5);}
+  .preview-body{flex:1 1 auto;overflow:auto;-webkit-overflow-scrolling:touch;padding:12px;text-align:center;}
+  .preview-body img{max-width:100%;height:auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.4);}
+
   .modal-overlay{
     position:fixed;inset:0;z-index:200;
     background:rgba(10,22,32,0.6);
@@ -2485,10 +2501,11 @@ function renderAssignment(){
   <div class="card" style="display:flex;gap:10px;flex-wrap:wrap;">
     ${(!d.editingEventId || d.hasRegistrationSnapshot) ? `<button class="btn ghost" data-action="back-to-register" type="button">${d.editingEventId?'②配車登録に戻って条件を変更する':'②配車登録に戻って修正'}</button>` : ''}
     ${d.editingEventId ? `<button class="btn ghost" data-action="cancel-edit-history" type="button">保存せずに履歴一覧へ戻る</button>` : ''}
-    <button class="btn ghost" data-action="export-image" type="button">画像として保存（JPEG）</button>
+    <button class="btn ghost" data-action="preview-image" type="button">プレビュー</button>
+    <button class="btn ghost" data-action="export-image" type="button">共有</button>
     <button class="btn ${isValid?'':'danger'}" data-action="save-history" ${isValid?'':'title="絶対条件が満たされていません。保存前に確認が表示されます。"'}>${isValid?'履歴に保存して確定する':'絶対条件未達のまま保存する'}</button>
   </div>
-  <p class="small-muted" style="margin-top:-6px;">スマートフォンでは「共有」からLINEやGoogleドライブなどに直接送ることもできます（対応ブラウザのみ）。</p>
+  <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます。スマートフォンでは「共有」から画像（JPEG）またはPDFを選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
   `;
 }
 
@@ -2912,10 +2929,22 @@ function buildExportHtml(d, r){
     ${summaryTableHtml}
   </div>`;
 }
-async function exportAssignmentImage(){
+/* 共有時に付けるコメント。例：「【7/26 ○○戦】配車表です」
+   日付は配車表の日付（M/D）、○○は「行先・対戦相手」。未入力の項目は省いて組み立てる。 */
+function buildShareText(d){
+  const m = String((d&&d.date)||'').match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const dateLabel = m ? `${Number(m[2])}/${Number(m[3])}` : '';
+  let opp = String((d&&d.destination)||'').trim();
+  if (opp && !/戦$/.test(opp)) opp += '戦'; // 「○○戦」と入力済みなら二重にしない
+  const inner = [dateLabel, opp].filter(Boolean).join(' ');
+  return inner ? `【${inner}】配車表です` : '配車表です';
+}
+
+/* 配車表の画像（JPEG）を作成して {blob, filename, url} を返す。共有・プレビューの両方から使う。 */
+async function buildAssignmentImage(){
   const d = state.draft;
-  if (!d || !d.result){ alert('配車表が見つかりませんでした。'); return; }
-  if (!window.html2canvas){ alert('画像化ライブラリの読み込みに失敗しました。通信環境を確認して再度お試しください。'); return; }
+  if (!d || !d.result){ alert('配車表が見つかりませんでした。'); return null; }
+  if (!window.html2canvas){ alert('画像化ライブラリの読み込みに失敗しました。通信環境を確認して再度お試しください。'); return null; }
 
   // 画面には表示しない位置に、出力専用のレイアウトを一時的に生成する
   const holder = document.createElement('div');
@@ -2932,7 +2961,7 @@ async function exportAssignmentImage(){
     canvas = await window.html2canvas(target, {backgroundColor:'#ffffff', scale:2, useCORS:true});
   }catch(e){
     document.body.removeChild(holder);
-    alert('画像の作成に失敗しました。'); console.error(e); return;
+    alert('画像の作成に失敗しました。'); console.error(e); return null;
   }
   document.body.removeChild(holder);
 
@@ -2955,22 +2984,147 @@ async function exportAssignmentImage(){
   ctx.fillRect(0, 0, targetW, targetH);
   ctx.drawImage(canvas, 0, 0, srcW, srcH, Math.round((targetW - drawW) / 2), 0, drawW, drawH);
 
-  finalCanvas.toBlob(async (blob)=>{
-    if (!blob){ alert('画像の作成に失敗しました。'); return; }
-    const filename = `配車表_${(d&&d.date)||'未定'}.jpg`;
-    const file = (typeof File!=='undefined') ? new File([blob], filename, {type:'image/jpeg'}) : null;
-    if (file && navigator.canShare && navigator.canShare({files:[file]})){
-      try{
-        await navigator.share({files:[file], title:'配車表', text:'配車表を共有します'});
-        return;
-      }catch(e){ /* キャンセル、または未対応 → ダウンロードにフォールバック */ }
+  const blob = await new Promise(resolve=>finalCanvas.toBlob(resolve, 'image/jpeg', 0.92));
+  if (!blob){ alert('画像の作成に失敗しました。'); return null; }
+  return {blob, shareText:buildShareText(d), width:targetW, height:targetH, baseName:`配車表_${(d&&d.date)||'未定'}`, filename:`配車表_${(d&&d.date)||'未定'}.jpg`};
+}
+
+/* JPEG画像を、A4 1ページ分のPDFに変換する（外部ライブラリ不要・通信なしで作成）。
+   画像はすでにA4の縦横比なので、ページいっぱいに配置する。 */
+async function jpegBlobToPdfBlob(jpegBlob, imgW, imgH){
+  const jpeg = new Uint8Array(await jpegBlob.arrayBuffer());
+  const enc = new TextEncoder();
+  const PAGE_W = 595.28, PAGE_H = 841.89; // A4（pt）
+  const chunks = []; const offsets = []; let pos = 0;
+  const push = (u8)=>{ chunks.push(u8); pos += u8.length; };
+  const pushText = (t)=>push(enc.encode(t));
+  const beginObj = (n)=>{ offsets[n] = pos; pushText(`${n} 0 obj\n`); };
+  pushText('%PDF-1.4\n');
+  beginObj(1); pushText('<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+  beginObj(2); pushText('<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+  beginObj(3); pushText(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_W} ${PAGE_H}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n`);
+  beginObj(4);
+  pushText(`<< /Type /XObject /Subtype /Image /Width ${imgW} /Height ${imgH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);
+  push(jpeg); pushText('\nendstream\nendobj\n');
+  const content = `q ${PAGE_W} 0 0 ${PAGE_H} 0 0 cm /Im0 Do Q`;
+  beginObj(5); pushText(`<< /Length ${content.length} >>\nstream\n${content}\nendstream\nendobj\n`);
+  const xrefPos = pos;
+  let xref = 'xref\n0 6\n0000000000 65535 f \n';
+  for (let i=1;i<=5;i++) xref += String(offsets[i]).padStart(10,'0') + ' 00000 n \n';
+  pushText(xref + `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`);
+  return new Blob(chunks, {type:'application/pdf'});
+}
+
+/* 作成済みの画像を、選んだ形式（'jpeg'／'pdf'）で共有する。
+   共有できない環境では、ファイルをダウンロードして代替する */
+async function shareImageResult(img, format){
+  let blob = img.blob, filename = img.filename, mime = 'image/jpeg';
+  if (format==='pdf'){
+    try{
+      blob = await jpegBlobToPdfBlob(img.blob, img.width, img.height);
+    }catch(e){
+      alert('PDFの作成に失敗しました。'); console.error(e); return;
     }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(()=>URL.revokeObjectURL(url), 8000);
-  }, 'image/jpeg', 0.92);
+    filename = img.baseName + '.pdf'; mime = 'application/pdf';
+  }
+  const file = (typeof File!=='undefined') ? new File([blob], filename, {type:mime}) : null;
+  if (file && navigator.canShare && navigator.canShare({files:[file]})){
+    try{
+      await navigator.share({files:[file], title:img.shareText, text:img.shareText});
+      return;
+    }catch(e){
+      if (e && e.name==='AbortError') return; // 共有シートを閉じただけ（キャンセル）
+      /* 未対応などの失敗 → ダウンロードにフォールバック */
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 8000);
+}
+
+/* 「共有」を押したときの形式選択（画像JPEG／PDF）。選んだ形式 'jpeg'／'pdf'、キャンセルなら null を返す。
+   render()の再描画の影響を受けないよう、画面の最前面に独立したダイアログとして表示する。 */
+function chooseShareFormat(){
+  return new Promise(resolve=>{
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay confirm-overlay share-format-overlay';
+    ov.innerHTML = `
+      <div class="card">
+        <h2>共有する形式を選んでください</h2>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px;">
+          <button class="btn" type="button" data-format="jpeg">画像（JPEG）</button>
+          <button class="btn" type="button" data-format="pdf">PDF（A4・1ページ）</button>
+          <button class="btn ghost" type="button" data-format="">キャンセル</button>
+        </div>
+      </div>`;
+    const done = (v)=>{ ov.remove(); resolve(v); };
+    ov.addEventListener('click', (ev)=>{
+      const b = ev.target.closest('[data-format]');
+      if (b){ done(b.dataset.format || null); return; }
+      if (ev.target===ov) done(null); // 余白タップはキャンセル
+    });
+    document.body.appendChild(ov);
+  });
+}
+
+let exportBusy = false;
+async function exportAssignmentImage(){ // 「共有」ボタン
+  if (exportBusy) return;
+  exportBusy = true;
+  try{
+    const format = await chooseShareFormat();
+    if (!format) return;
+    const img = await buildAssignmentImage();
+    if (img) await shareImageResult(img, format);
+  } finally { exportBusy = false; }
+}
+
+/* 「プレビュー」ボタン：保存・共有をせずに、出力される画像の内容を画面上で確認できる。
+   render()の再描画の影響を受けないよう、画面の最前面に独立したオーバーレイとして表示する。 */
+function closeAssignmentPreview(){
+  const ov = document.getElementById('assignment-preview-overlay');
+  if (ov){
+    const im = ov.querySelector('img');
+    if (im && im.src) URL.revokeObjectURL(im.src);
+    ov.remove();
+  }
+}
+async function previewAssignmentImage(){
+  if (exportBusy) return;
+  exportBusy = true;
+  try{
+    const img = await buildAssignmentImage();
+    if (!img) return;
+    closeAssignmentPreview();
+    const url = URL.createObjectURL(img.blob);
+    const ov = document.createElement('div');
+    ov.id = 'assignment-preview-overlay';
+    ov.className = 'preview-overlay';
+    ov.innerHTML = `
+      <div class="preview-bar">
+        <span class="preview-title">プレビュー（出力される画像）</span>
+        <span class="preview-actions">
+          <button class="btn small" type="button" data-preview="share">共有</button>
+          <button class="btn small ghost" type="button" data-preview="close">閉じる</button>
+        </span>
+      </div>
+      <div class="preview-body"><img alt="配車表のプレビュー" src="${url}"></div>`;
+    ov.addEventListener('click', async (ev)=>{
+      const b = ev.target.closest('[data-preview]');
+      if (b){
+        if (b.dataset.preview==='close') closeAssignmentPreview();
+        else if (b.dataset.preview==='share'){
+          const format = await chooseShareFormat();
+          if (format) await shareImageResult(img, format);
+        }
+        return;
+      }
+      if (ev.target===ov) closeAssignmentPreview(); // 余白タップでも閉じる
+    });
+    document.body.appendChild(ov);
+  } finally { exportBusy = false; }
 }
 
 /* =========================================================
@@ -3088,7 +3242,7 @@ function renderHelp(){
       body: `
       <div class="help-step"><span class="num">1</span><div><b>初期設定</b><br>家族（保護者・選手）と指導者・コーチを登録します。乗車定員や、役員・指導者車／用具車として使えるかどうかもここで設定します。一度登録すれば、次回以降は基本的に触る必要はありません。</div></div>
       <div class="help-step"><span class="num">2</span><div><b>配車登録</b><br>遠征1回ごとに、日付・行先と、参加できる父母・選手、車を出せる家庭（運転手が誰か）を入力します。必要な配車台数を入れておくと、配車回数が少ない家庭から自動で不足分を選ぶこともできます。</div></div>
-      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、画像として保存・共有もできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
+      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、「プレビュー」で出力画像を確認したり、「共有」から画像（JPEG）またはPDFとして送ったりできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
       <div class="help-step"><span class="num">4</span><div><b>履歴・実績</b><br>確定した配車の履歴と、家庭ごとの配車回数（輪番の参考）を確認できます。アプリを使い始める前の実績は「過去の実績を登録」からまとめて入力できます。</div></div>
       `,
     },
@@ -3119,7 +3273,7 @@ function renderHelp(){
       <ul>
         <li>タブ（使い方／①〜④）が画面に収まらない場合は、左右にスワイプすると切り替えられます。</li>
         <li>表（一覧表）はスマートフォンでは横スクロールせず、1件ずつカード状に表示されます。</li>
-        <li>配車表は「画像として保存（JPEG）」から画像化でき、対応ブラウザでは「共有」からLINEなどへ直接送れます。</li>
+        <li>配車表は「プレビュー」で出力される画像を確認でき、「共有」から画像（JPEG）またはPDFを選んでLINEなどへ直接送れます（共有に未対応のブラウザではファイルがダウンロードされます）。</li>
       </ul>
       `,
     },
@@ -4532,6 +4686,7 @@ ${ranked.map((sn,i)=>`${i+1}. ${sn}家（過去${(rotation[sn]||{}).count||0}回
     state.activeTab = 'register'; render(); return;
   }
   if (action==='export-image'){ exportAssignmentImage(); return; }
+  if (action==='preview-image'){ previewAssignmentImage(); return; }
   if (action==='toggle-help-section'){
     const key = el.dataset.key;
     state.helpOpenSections[key] = !state.helpOpenSections[key];
