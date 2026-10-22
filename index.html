@@ -1024,6 +1024,10 @@ function playerSeatKey(seat){
 }
 function computePlayerCoRideCounts(){
   const counts = {};
+  // 予約キー '__rideCar'：選手ごとの「どの車（運転手の家庭）に過去何回乗ったか」の集計。
+  // 選手キーは「姓#番号」形式のため、この予約キーと衝突しない。
+  // 自分の親の車は「ひいき」ではないため集計しない。
+  const rideCar = counts.__rideCar = {};
   function bump(a,b){
     if (!counts[a]) counts[a] = {};
     counts[a][b] = (counts[a][b]||0) + 1;
@@ -1031,6 +1035,15 @@ function computePlayerCoRideCounts(){
   state.events.forEach(ev=>{
     (ev.result && ev.result.cars || []).forEach(car=>{
       const players = (car.seats||[]).filter(s=>s.kind==='player' && s.surname);
+      const carRef = car.familyId || car.familySurname;
+      if (carRef){
+        players.forEach(pl=>{
+          if (pl.surname === car.familySurname) return;
+          const k = playerSeatKey(pl);
+          if (!rideCar[k]) rideCar[k] = {};
+          rideCar[k][carRef] = (rideCar[k][carRef]||0) + 1;
+        });
+      }
       for (let i=0;i<players.length;i++){
         for (let j=0;j<players.length;j++){
           if (i===j) continue;
@@ -1995,7 +2008,17 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
         });
         return s;
       };
-      return scoreOf(a) - scoreOf(b);
+      const coA = scoreOf(a), coB = scoreOf(b);
+      if (coA!==coB) return coA - coB;
+      // 【同じ車への乗車の偏り防止】上記すべてが同点の場合に限り、この選手が
+      // 過去に同じ車（運転手の家庭）へ乗った回数が少ない車を優先する。
+      // 最後の同点処理のため、親子・用具車・集約・同乗メンバーの判定には影響しない。
+      const rideOf = (car)=>{
+        if (car.familySurname === p.surname) return 0;
+        const m = coRideCounts.__rideCar && coRideCounts.__rideCar[pKey];
+        return (m && m[car.familyId || car.familySurname]) || 0;
+      };
+      return rideOf(a) - rideOf(b);
     });
     remainingPlayers.shift();
     withSpace[0].seats.push(p);
