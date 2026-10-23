@@ -345,6 +345,31 @@
   .preview-body{flex:1 1 auto;overflow:auto;-webkit-overflow-scrolling:touch;padding:12px;text-align:center;}
   .preview-body img{max-width:100%;height:auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.4);}
 
+  .preview-tabs{display:flex;gap:6px;padding:8px 12px 0;flex-wrap:wrap;align-items:center;}
+  .preview-tabs button{
+    appearance:none;border:1px solid rgba(255,255,255,.5);background:transparent;color:#fff;
+    border-radius:16px;padding:6px 14px;font-size:13px;font-family:inherit;cursor:pointer;
+  }
+  .preview-tabs button.active{background:#fff;color:#1E3A52;font-weight:700;border-color:#fff;}
+  .preview-tabs .preview-note{font-size:12px;color:#C9D6E0;margin-left:6px;}
+
+  /* ---------- 簡易表（総務のLINE確認用）の画像出力専用レイアウト ---------- */
+  .simple-sheet{
+    background:#ffffff;padding:18px 18px 16px;box-sizing:border-box;
+    font-family:'Noto Sans JP', sans-serif;color:#1c1c1c;
+  }
+  .simple-sheet .ss-title{font-family:'Zen Kaku Gothic New','Noto Sans JP',sans-serif;font-size:22px;font-weight:900;margin:0 0 2px;color:#1E3A52;}
+  .simple-sheet .ss-meta{font-size:14px;color:#444;margin-bottom:10px;}
+  .simple-sheet table.ss-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13.5px;margin-bottom:14px;}
+  .simple-sheet .ss-table th{background:#1E3A52;color:#fff;font-size:12px;padding:5px 6px;border:1px solid #8FA0AE;text-align:center;white-space:nowrap;}
+  .simple-sheet .ss-table td{border:1px solid #8FA0AE;padding:6px 4px;text-align:center;vertical-align:middle;white-space:nowrap;overflow:hidden;height:20px;}
+  .simple-sheet .ss-table td.no{font-weight:700;}
+  .simple-sheet .ss-table td.lab{font-weight:700;background:#F3F6F9;}
+  .simple-sheet .ss-table td.lab.local{color:#B26A00;}
+  .simple-sheet .ss-table td.lab.held{color:#A33A2A;}
+  .simple-sheet .ss-table td.cnt{font-weight:700;background:#F3F6F9;}
+  .simple-sheet .ss-warn{border:1px solid #D9A39A;background:#FBECE9;color:#8A2E22;border-radius:6px;padding:6px 10px;font-size:13px;margin-bottom:10px;}
+
   .modal-overlay{
     position:fixed;inset:0;z-index:200;
     background:rgba(10,22,32,0.6);
@@ -2601,7 +2626,7 @@ function renderAssignment(){
     <button class="btn ghost" data-action="export-image" type="button">共有</button>
     <button class="btn ${isValid?'':'danger'}" data-action="save-history" ${isValid?'':'title="絶対条件が満たされていません。保存前に確認が表示されます。"'}>${isValid?'履歴に保存して確定する':'絶対条件未達のまま保存する'}</button>
   </div>
-  <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます。スマートフォンでは「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）を選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
+  <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます（「完成版」と「簡易表」を切り替え可能）。総務内のLINE確認には、直行直帰・留め置きの台数と該当者が分かる「簡易表」が便利です。スマートフォンでは「共有」から簡易表・画像（JPEG）・PDF・Excel（チーム提出用書式）を選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
   `;
 }
 
@@ -3036,8 +3061,123 @@ function buildShareText(d){
   return inner ? `【${inner}】配車表です` : '配車表です';
 }
 
-/* 配車表の画像（JPEG）を作成して {blob, filename, url} を返す。共有・プレビューの両方から使う。 */
-async function buildAssignmentImage(){
+/* 簡易表（総務のLINE確認用）。完成版の配車表より情報を絞り、
+   「どの車に誰が乗るか」と「現地集合解散・留め置きの台数と該当者」だけが一目で分かる画像にする。
+   運転手・同乗者・該当者はすべて1人1マスの罫線つきで表示し、文字が改行されない幅に調整する。 */
+function buildSimpleExportHtml(d, r){
+  const WD = ['日','月','火','水','木','金','土'];
+  const dm = String(d.date||'').match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  let dateLabel = '';
+  if (dm){
+    const dt = new Date(Number(dm[1]), Number(dm[2])-1, Number(dm[3]));
+    dateLabel = `${Number(dm[2])}/${Number(dm[3])}（${WD[dt.getDay()]}）`;
+  }
+  const metaParts = [dateLabel, String(d.destination||'').trim(), d.location ? `＠${String(d.location).trim()}` : ''].filter(Boolean);
+
+  // 横幅を抑えるための名前の短縮ルール
+  //   保護者　　：苗字＋下の名前の最初の1文字（例：森 圭太郎→森圭）
+  //   コーチ　　：かっこ書きは無視して、苗字＋「コ」（例：阿部(と)コーチ→阿部コ、中村コーチ→中村コ）
+  //   監督・会長：苗字のみ（例：酒井監督→酒井）
+  const shortParentName = (full)=>{
+    const parts = String(full).trim().split(/[\s\u3000]+/);
+    return parts.length>=2 && parts[1] ? parts[0] + Array.from(parts[1])[0] : String(full);
+  };
+  const shortStaffName = (name)=>{
+    const n = String(name||'').replace(/[（(][^）)]*[）)]/g,'').trim(); // かっこ書きを取り除く
+    let m = n.match(/^(.*?)(サポート)?コーチ$/);
+    if (m && m[1].trim()) return m[1].trim() + 'コ';
+    m = n.match(/^(.*?)(監督|会長)$/);
+    if (m && m[1].trim()) return m[1].trim();
+    return shortParentName(n); // 上記以外（例：サポートコーチとして登録された保護者の氏名）は保護者と同じ短縮
+  };
+  // 名前は家庭もコーチも同じ欄にまとめる（名前で区別できるため分けない）
+  const localNames = [...(r.localArrivalFamilies||[]).map(sn=>sn+'家'), ...(r.localArrivalStaff||[]).map(shortStaffName)];
+  const heldNames = [...(r.staffHeldBack||[]).map(shortStaffName), ...(r.heldBackFamilies||[]).map(sn=>sn+'家')];
+
+  // 同乗者のマス数＝車ごとの同乗者数の最大（最低5）。現地集合解散・留め置きの表も同じ列幅に揃える
+  const shortName = (seat)=>{
+    const full = seatDisplayName(seat);
+    if (seat.kind==='staff') return shortStaffName(full);
+    if (seat.kind==='driver' || seat.kind==='parent') return shortParentName(full);
+    return full;
+  };
+  const carRows = r.cars.map(car=>{
+    const seats = orderSeatsForDisplay(car.seats);
+    const driverSeat = seats.find(s=>s.kind==='driver');
+    return {
+      car,
+      driverName: driverSeat ? shortName(driverSeat) : `${car.familySurname||''}号車`,
+      others: seats.filter(s=>s!==driverSeat).map(s=>shortName(s)),
+    };
+  });
+  const P = Math.max(5, ...carRows.map(x=>x.others.length));
+  // マスの幅は、実際に表示する最も長い名前に合わせて決める（改行されず、かつ広がりすぎないように）
+  const visLen = (t)=>Array.from(String(t)).reduce((a,ch)=>a+(ch.charCodeAt(0)<128?0.6:1),0);
+  const widthFor = (names, min)=>Math.max(min, Math.ceil(Math.max(0, ...names.map(visLen))*14 + 14));
+  const CELL_W = widthFor([...carRows.flatMap(x=>x.others), ...localNames, ...heldNames], 62);
+  const DRV_W = CELL_W; // 運転手のマスは同乗者のマスと同じ幅にする
+  const NO_W = 44;
+  const sheetW = 36 + NO_W + DRV_W + P*CELL_W;
+  // 下の表（現地集合解散・留め置き）は、先頭2列を「区分」「台数」に使う（合計幅は上の表の先頭2列と同じ）
+  const LAB_W = 64, CNT_W = NO_W + DRV_W - LAB_W; // 「区分」は4文字が収まる幅。台数は同乗者のマスに近い幅になる
+  const colgroupInfo = `<colgroup><col style="width:${LAB_W}px"><col style="width:${CNT_W}px">${('<col style="width:'+CELL_W+'px">').repeat(P)}</colgroup>`;
+  const colgroup = `<colgroup><col style="width:${NO_W}px"><col style="width:${DRV_W}px">${('<col style="width:'+CELL_W+'px">').repeat(P)}</colgroup>`;
+
+  const carRowsHtml = carRows.map((x, idx)=>{
+    const cells = [];
+    for (let i=0;i<P;i++) cells.push(`<td class="nm">${i<x.others.length ? escapeHtml(x.others[i]) : ''}</td>`);
+    return `<tr>
+      <td class="no">${carOrderNumber(idx+1)}</td>
+      <td class="nm">${escapeHtml(x.driverName)}</td>
+      ${cells.join('')}
+    </tr>`;
+  }).join('');
+  const carTableHtml = `
+    <table class="ss-table">
+      ${colgroup}
+      <thead><tr><th>No.</th><th>運転手</th><th colspan="${P}">同乗者</th></tr></thead>
+      <tbody>${carRowsHtml || `<tr><td colspan="${2+P}" style="text-align:center;color:#888;">配車される車がありません</td></tr>`}</tbody>
+    </table>`;
+
+  // 区分名・台数・該当者（1人1マス。マス数を超える場合は次の行に続ける）
+  const infoBlock = (label, cls, names)=>{
+    const rowCount = Math.max(1, Math.ceil(names.length / P));
+    let html = '';
+    for (let k=0;k<rowCount;k++){
+      const cells = [];
+      for (let i=0;i<P;i++){
+        const nm = names[k*P + i];
+        cells.push(`<td class="nm">${nm!=null ? escapeHtml(nm) : (names.length===0 && k===0 && i===0 ? '<span style="color:#999;">なし</span>' : '')}</td>`);
+      }
+      html += `<tr>${k===0 ? `<td class="lab ${cls}" rowspan="${rowCount}">${label}</td><td class="cnt" rowspan="${rowCount}">${names.length}台</td>` : ''}${cells.join('')}</tr>`;
+    }
+    return html;
+  };
+  const infoTableHtml = `
+    <table class="ss-table ss-info">
+      ${colgroupInfo}
+      <tbody>
+        ${infoBlock('直行直帰', 'local', localNames)}
+        ${infoBlock('留め置き', 'held', heldNames)}
+      </tbody>
+    </table>`;
+
+  const unassignedHtml = (r.unassigned && r.unassigned.length)
+    ? `<div class="ss-warn"><b>未配置 ${r.unassigned.length}名</b>：${r.unassigned.map(p=>escapeHtml(seatDisplayName(p))).join('、')}</div>` : '';
+
+  return `
+  <div class="simple-sheet" style="width:${sheetW}px;">
+    <div class="ss-title">配車表（確認用）</div>
+    <div class="ss-meta">${metaParts.map(x=>escapeHtml(x)).join('　')}</div>
+    ${unassignedHtml}
+    ${carTableHtml}
+    ${infoTableHtml}
+  </div>`;
+}
+
+/* 配車表の画像（JPEG）を作成して {blob, filename, url} を返す。共有・プレビューの両方から使う。
+   kind：'full'＝完成版（A4・既定）／'simple'＝簡易表（LINE確認用）。 */
+async function buildAssignmentImage(kind){
   const d = state.draft;
   if (!d || !d.result){ alert('配車表が見つかりませんでした。'); return null; }
   if (!window.html2canvas){ alert('画像化ライブラリの読み込みに失敗しました。通信環境を確認して再度お試しください。'); return null; }
@@ -3048,7 +3188,7 @@ async function buildAssignmentImage(){
   holder.style.top = '0';
   holder.style.left = '-9999px';
   holder.style.zIndex = '-1';
-  holder.innerHTML = buildExportHtml(d, d.result);
+  holder.innerHTML = (kind==='simple') ? buildSimpleExportHtml(d, d.result) : buildExportHtml(d, d.result);
   document.body.appendChild(holder);
   const target = holder.firstElementChild;
 
@@ -3065,24 +3205,31 @@ async function buildAssignmentImage(){
   // 出来上がった配車表をA4サイズ（210mm×297mm）の縦横比の中に収める。
   // 内容がA4の比率より縦長な場合だけ縮小し、左右に白い余白を入れる。
   // 内容がA4の比率より短い場合はそのままの大きさで、下側に白い余白が入る。
-  const A4_RATIO = 297 / 210;
-  const srcW = canvas.width, srcH = canvas.height;
-  const targetW = srcW;
-  const targetH = Math.round(targetW * A4_RATIO);
-  const fitScale = Math.min(1, targetH / srcH);
-  const drawW = Math.round(srcW * fitScale);
-  const drawH = Math.round(srcH * fitScale);
-  const finalCanvas = document.createElement('canvas');
-  finalCanvas.width = targetW;
-  finalCanvas.height = targetH;
-  const ctx = finalCanvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, targetW, targetH);
-  ctx.drawImage(canvas, 0, 0, srcW, srcH, Math.round((targetW - drawW) / 2), 0, drawW, drawH);
+  // ※簡易表（'simple'）はスマートフォンのLINEで見やすいよう、A4には収めず内容どおりの大きさで出力する。
+  let finalCanvas, targetW, targetH;
+  if (kind==='simple'){
+    finalCanvas = canvas; targetW = canvas.width; targetH = canvas.height;
+  } else {
+    const A4_RATIO = 297 / 210;
+    const srcW = canvas.width, srcH = canvas.height;
+    targetW = srcW;
+    targetH = Math.round(targetW * A4_RATIO);
+    const fitScale = Math.min(1, targetH / srcH);
+    const drawW = Math.round(srcW * fitScale);
+    const drawH = Math.round(srcH * fitScale);
+    finalCanvas = document.createElement('canvas');
+    finalCanvas.width = targetW;
+    finalCanvas.height = targetH;
+    const ctx = finalCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.drawImage(canvas, 0, 0, srcW, srcH, Math.round((targetW - drawW) / 2), 0, drawW, drawH);
+  }
 
   const blob = await new Promise(resolve=>finalCanvas.toBlob(resolve, 'image/jpeg', 0.92));
   if (!blob){ alert('画像の作成に失敗しました。'); return null; }
-  return {blob, shareText:buildShareText(d), width:targetW, height:targetH, baseName:`配車表_${(d&&d.date)||'未定'}`, filename:`配車表_${(d&&d.date)||'未定'}.jpg`};
+  const baseName = (kind==='simple' ? '配車表_簡易' : '配車表') + `_${(d&&d.date)||'未定'}`;
+  return {blob, shareText:buildShareText(d), width:targetW, height:targetH, baseName, filename:`${baseName}.jpg`};
 }
 
 /* JPEG画像を、A4 1ページ分のPDFに変換する（外部ライブラリ不要・通信なしで作成）。
@@ -3416,7 +3563,9 @@ function chooseShareFormat(){
     ov.innerHTML = `
       <div class="card">
         <h2>共有する形式を選んでください</h2>
+        <p class="small-muted" style="margin:0 0 4px;">総務内の確認には「簡易表」、チーム提出・完成版にはそれ以外を選びます。</p>
         <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px;">
+          <button class="btn" type="button" data-format="simple">簡易表（LINE確認用・画像）</button>
           <button class="btn" type="button" data-format="jpeg">画像（JPEG）</button>
           <button class="btn" type="button" data-format="pdf">PDF（A4・1ページ）</button>
           <button class="btn" type="button" data-format="xlsx">Excel（チーム提出用書式）</button>
@@ -3433,6 +3582,12 @@ function chooseShareFormat(){
   });
 }
 
+/* 簡易表（LINE確認用）をJPEG画像として共有する。作成済みの画像があれば渡して再利用する */
+async function shareSimpleImage(cached){
+  const img = cached || await buildAssignmentImage('simple');
+  if (img) await shareImageResult(img, 'jpeg');
+}
+
 let exportBusy = false;
 async function exportAssignmentImage(){ // 「共有」ボタン
   if (exportBusy) return;
@@ -3441,7 +3596,8 @@ async function exportAssignmentImage(){ // 「共有」ボタン
     const format = await chooseShareFormat();
     if (!format) return;
     if (format==='xlsx'){ await shareAssignmentXlsx(); return; } // Excelは画像化せず直接作成
-    const img = await buildAssignmentImage();
+    if (format==='simple'){ await shareSimpleImage(); return; } // 簡易表（LINE確認用）
+    const img = await buildAssignmentImage('full');
     if (img) await shareImageResult(img, format);
   } finally { exportBusy = false; }
 }
@@ -3460,30 +3616,67 @@ async function previewAssignmentImage(){
   if (exportBusy) return;
   exportBusy = true;
   try{
-    const img = await buildAssignmentImage();
-    if (!img) return;
+    // 完成版（'full'）と簡易表（'simple'）を切り替えて確認できる。作成済みの画像は使い回す。
+    const imgs = {};
+    const first = await buildAssignmentImage('full');
+    if (!first) return;
+    imgs.full = first;
     closeAssignmentPreview();
-    const url = URL.createObjectURL(img.blob);
+    let mode = 'full', switching = false;
+    const TITLES = {full:'プレビュー（完成版）', simple:'プレビュー（簡易表・LINE確認用）'};
+    const url = URL.createObjectURL(first.blob);
     const ov = document.createElement('div');
     ov.id = 'assignment-preview-overlay';
     ov.className = 'preview-overlay';
     ov.innerHTML = `
       <div class="preview-bar">
-        <span class="preview-title">プレビュー（出力される画像）</span>
+        <span class="preview-title">${TITLES.full}</span>
         <span class="preview-actions">
           <button class="btn small" type="button" data-preview="share">共有</button>
           <button class="btn small ghost" type="button" data-preview="close">閉じる</button>
         </span>
       </div>
+      <div class="preview-tabs">
+        <button type="button" data-preview-mode="full" class="active">完成版</button>
+        <button type="button" data-preview-mode="simple">簡易表（LINE確認用）</button>
+        <span class="preview-note"></span>
+      </div>
       <div class="preview-body"><img alt="配車表のプレビュー" src="${url}"></div>`;
+    const showMode = async (m)=>{
+      if (switching || m===mode) return;
+      switching = true;
+      const note = ov.querySelector('.preview-note');
+      try{
+        if (!imgs[m]){
+          note.textContent = '作成中…';
+          imgs[m] = await buildAssignmentImage(m);
+        }
+        if (!imgs[m] || !document.body.contains(ov)) return; // 失敗、または作成中に閉じられた
+        mode = m;
+        const im = ov.querySelector('img');
+        const oldSrc = im.src;
+        im.src = URL.createObjectURL(imgs[m].blob);
+        if (oldSrc) URL.revokeObjectURL(oldSrc);
+        ov.querySelector('.preview-title').textContent = TITLES[m];
+        ov.querySelectorAll('[data-preview-mode]').forEach(b=>b.classList.toggle('active', b.dataset.previewMode===m));
+        ov.querySelector('.preview-body').scrollTop = 0;
+      } finally {
+        note.textContent = '';
+        switching = false;
+      }
+    };
     ov.addEventListener('click', async (ev)=>{
+      const t = ev.target.closest('[data-preview-mode]');
+      if (t){ await showMode(t.dataset.previewMode); return; }
       const b = ev.target.closest('[data-preview]');
       if (b){
         if (b.dataset.preview==='close') closeAssignmentPreview();
         else if (b.dataset.preview==='share'){
+          if (mode==='simple'){ await shareSimpleImage(imgs.simple); return; } // 簡易表は画像（JPEG）で、そのまま共有
           const format = await chooseShareFormat();
           if (format==='xlsx') await shareAssignmentXlsx();
-          else if (format) await shareImageResult(img, format);
+          else if (format==='simple') await shareSimpleImage(imgs.simple);
+          else if (format) await shareImageResult(imgs.full, format);
         }
         return;
       }
@@ -3608,7 +3801,7 @@ function renderHelp(){
       body: `
       <div class="help-step"><span class="num">1</span><div><b>初期設定</b><br>家族（保護者・選手）と指導者・コーチを登録します。乗車定員や、役員・指導者車／用具車として使えるかどうかもここで設定します。一度登録すれば、次回以降は基本的に触る必要はありません。</div></div>
       <div class="help-step"><span class="num">2</span><div><b>配車登録</b><br>遠征1回ごとに、日付・行先と、参加できる父母・選手、車を出せる家庭（運転手が誰か）を入力します。必要な配車台数を入れておくと、配車回数が少ない家庭から自動で不足分を選ぶこともできます。</div></div>
-      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、「プレビュー」で出力画像を確認したり、「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）として送ったりできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
+      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、「プレビュー」で出力画像（完成版／簡易表）を確認したり、「共有」から簡易表（LINE確認用）・画像（JPEG）・PDF・Excel（チーム提出用書式）として送ったりできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
       <div class="help-step"><span class="num">4</span><div><b>履歴・実績</b><br>確定した配車の履歴と、家庭ごとの配車回数（輪番の参考）を確認できます。アプリを使い始める前の実績は「過去の実績を登録」からまとめて入力できます。</div></div>
       `,
     },
@@ -3639,7 +3832,7 @@ function renderHelp(){
       <ul>
         <li>タブ（使い方／①〜④）が画面に収まらない場合は、左右にスワイプすると切り替えられます。</li>
         <li>表（一覧表）はスマートフォンでは横スクロールせず、1件ずつカード状に表示されます。</li>
-        <li>配車表は「プレビュー」で出力される画像を確認でき、「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）を選んでLINEなどへ直接送れます（共有に未対応のブラウザではファイルがダウンロードされます）。</li>
+        <li>配車表は「プレビュー」で出力される画像を確認でき（完成版／簡易表の切り替え可）、「共有」から簡易表（LINE確認用）・画像（JPEG）・PDF・Excel（チーム提出用書式）を選んでLINEなどへ直接送れます（共有に未対応のブラウザではファイルがダウンロードされます）。簡易表は、車ごとの乗車者と、直行直帰・留め置きの台数と該当者だけをまとめた総務内の確認用です。</li>
       </ul>
       `,
     },
