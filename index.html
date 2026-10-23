@@ -2601,7 +2601,7 @@ function renderAssignment(){
     <button class="btn ghost" data-action="export-image" type="button">共有</button>
     <button class="btn ${isValid?'':'danger'}" data-action="save-history" ${isValid?'':'title="絶対条件が満たされていません。保存前に確認が表示されます。"'}>${isValid?'履歴に保存して確定する':'絶対条件未達のまま保存する'}</button>
   </div>
-  <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます。スマートフォンでは「共有」から画像（JPEG）またはPDFを選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
+  <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます。スマートフォンでは「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）を選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
   `;
 }
 
@@ -2706,7 +2706,7 @@ function renderHistory(){
     </div>
     <p class="desc">特定の家庭に配車の負担が偏らないよう、次回の配車をお願いする際の参考にしてください。${state.historyRankOpen?'':'「開く」を押すと一覧が表示されます。'}</p>
     ${state.historyRankOpen ? `
-    <div class="table-wrap" style="max-height:420px;overflow-y:auto;">
+    <div class="table-wrap">
     <table class="hist responsive-table">
       <thead><tr><th>家族</th><th>配車回数</th><th>直近の配車日</th></tr></thead>
       <tbody>${summaryRows || '<tr><td colspan="3" class="empty">まだ実績がありません</td></tr>'}</tbody>
@@ -3111,6 +3111,287 @@ async function jpegBlobToPdfBlob(jpegBlob, imgW, imgH){
   return new Blob(chunks, {type:'application/pdf'});
 }
 
+/* ---------------- Excel（チーム提出用書式 NC04_配車表）で出力 ----------------
+   チームへ提出する書式（NC04配車表.xlsx）と同じレイアウト・書体（Meiryo 9pt）・罫線・色で、
+   外部ライブラリなし・通信なしでブラウザ内で .xlsx を直接組み立てる。
+   ・1台につき「ラベル行（選手車／父兄車／用具車…）＋ 見出し行（運転手①／同乗者）＋ 氏名行」の枠
+   ・同乗者が5名を超える車は、氏名行を自動で増やす
+   ・現地集合・解散の家庭／指導者は「現地集合解散」の枠として続けて掲載
+   ・最後に留め置き枠、注意書き、台数の集計（配車／現地集合解散／コーチ／留め置き）を掲載 */
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+function xmlEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* 無圧縮（store）の簡易ZIPライタ。.xlsx は ZIP 形式なので、これだけで作成できる。 */
+const CRC_TABLE = (()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = (c&1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1); t[n]=c>>>0; } return t; })();
+function crc32(u8){ let c=0xFFFFFFFF; for(let i=0;i<u8.length;i++) c = CRC_TABLE[(c^u8[i])&0xFF] ^ (c>>>8); return (c^0xFFFFFFFF)>>>0; }
+function zipStore(files){
+  const enc = new TextEncoder();
+  const parts = [], central = [];
+  let offset = 0;
+  files.forEach(f=>{
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0x0800,true); lh.setUint16(8,0,true);
+    lh.setUint16(10,0,true); lh.setUint16(12,0x21,true); // 時刻0:00／日付1980-01-01
+    lh.setUint32(14,crc,true); lh.setUint32(18,data.length,true); lh.setUint32(22,data.length,true);
+    lh.setUint16(26,name.length,true); lh.setUint16(28,0,true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true); ch.setUint16(8,0x0800,true); ch.setUint16(10,0,true);
+    ch.setUint16(12,0,true); ch.setUint16(14,0x21,true);
+    ch.setUint32(16,crc,true); ch.setUint32(20,data.length,true); ch.setUint32(24,data.length,true);
+    ch.setUint16(28,name.length,true); ch.setUint32(42,offset,true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  });
+  const cdSize = central.reduce((a,u)=>a+u.length,0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0,0x06054b50,true); end.setUint16(8,files.length,true); end.setUint16(10,files.length,true);
+  end.setUint32(12,cdSize,true); end.setUint32(16,offset,true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], {type:XLSX_MIME});
+}
+
+function buildAssignmentXlsxBlob(d, r){
+  /* ---- スタイル登録（書体・罫線・配置の組み合わせごとに xf を作る） ---- */
+  const FONTS = {
+    base:   '<font><sz val="9"/><color rgb="FF000000"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    title:  '<font><sz val="13"/><color rgb="FF000000"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    bold:   '<font><b/><sz val="9"/><color rgb="FF000000"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    green:  '<font><b/><sz val="9"/><color rgb="FF548234"/><name val="Meiryo UI"/><family val="3"/><charset val="128"/></font>',
+    magenta:'<font><b/><sz val="9"/><color rgb="FFFF00FF"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    blue:   '<font><b/><sz val="9"/><color rgb="FF0070BF"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    red:    '<font><b/><sz val="9"/><color rgb="FFFF0000"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+    redreg: '<font><sz val="9"/><color rgb="FFFF0000"/><name val="Meiryo"/><family val="3"/><charset val="128"/></font>',
+  };
+  const fontNames = Object.keys(FONTS);
+  const borderList = ['']; // 0番は罫線なし
+  const xfList = [{font:'base', border:'', h:'left', wrap:false, shrink:false, fmt:0}];
+  const xfIndex = {};
+  function S(o){
+    const x = Object.assign({font:'base', border:'', h:'left', wrap:false, shrink:false, fmt:0}, o||{});
+    const key = [x.font,x.border,x.h,x.wrap,x.shrink,x.fmt].join('|');
+    if (key in xfIndex) return xfIndex[key];
+    if (borderList.indexOf(x.border)<0) borderList.push(x.border);
+    xfList.push(x); xfIndex[key] = xfList.length-1; return xfList.length-1;
+  }
+  const S_BASE = S({}); // 全セルの既定（Meiryo 9pt・左・上下中央）
+
+  /* ---- セル・行の組み立て ---- */
+  const rows = {}, heights = {}, merges = [];
+  const COLS = 'ABCDEFGHIJK';
+  const ref = (rr,c)=> COLS[c]+rr;
+  function put(rr, c, value, style){
+    (rows[rr] = rows[rr] || {})[c] = {v:value, s:(style==null?S_BASE:style)};
+  }
+  function setH(rr, h){ heights[rr] = h; }
+  // 枠線だけのセル（C〜H列）を敷く：4辺のうち必要な辺だけ罫線を付ける
+  function boxRowStyle(c, first, last, extra){
+    let b = '';
+    if (first) b += 'T';
+    if (last) b += 'B';
+    if (c===2) b += 'L';
+    if (c===7) b += 'R';
+    return S(Object.assign({border:b}, extra||{}));
+  }
+
+  let row = 1;
+  // タイトル（B1:H1 結合）：「10/25（日）  NC04_配車表  vs  相手  （＠場所）」
+  const WD = ['日','月','火','水','木','金','土'];
+  const dm = String(d.date||'').match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  let dateLabel = '〇/〇（〇）';
+  if (dm){
+    const dt = new Date(Number(dm[1]), Number(dm[2])-1, Number(dm[3]));
+    dateLabel = `${Number(dm[2])}/${Number(dm[3])}（${WD[dt.getDay()]}）`;
+  }
+  const opp = String(d.destination||'').trim() || '〇〇〇〇';
+  const place = String(d.location||'').trim() || '〇〇〇〇';
+  put(1, 1, `${dateLabel}  NC04_配車表  vs  ${opp}  （＠${place}）`, S({font:'title', shrink:true}));
+  for (let c=2;c<=7;c++) put(1, c, null, S({font:'title', shrink:true}));
+  merges.push('B1:H1'); setH(1, 24.75);
+  setH(2, 12);
+  row = 3;
+
+  /* 1台分の枠を書く。item = {label, labelFont, driverLabel, driverName, passengers[], showPassLabel} */
+  let carNo = 0;
+  function writeCarBlock(item){
+    carNo++;
+    const passPerRow = 5; // D〜H列の5マス
+    const nameRows = Math.max(1, Math.ceil(item.passengers.length / passPerRow));
+    const labelRow = row, headRow = row+1, firstName = row+2, lastRow = row+1+nameRows;
+    // ラベル行（選手車／父兄車 …）：色つき太字、下罫線なし（枠の上辺は見出し行側に付ける）
+    put(labelRow, 2, item.label, S({font:item.labelFont}));
+    setH(labelRow, 18);
+    // 見出し行（運転手①／同乗者）
+    put(headRow, 1, carNo, S({border:'LRT', h:'center'}));
+    put(headRow, 2, item.driverLabel, boxRowStyle(2, true, false, {wrap:true}));
+    for (let c=3;c<=7;c++){
+      put(headRow, c, (c===3 && item.showPassLabel) ? '同乗者' : null, boxRowStyle(c, true, false, {wrap:true}));
+    }
+    setH(headRow, 18);
+    // 氏名行
+    for (let k=0;k<nameRows;k++){
+      const rr = firstName + k, isLast = (rr===lastRow);
+      put(rr, 1, null, S({border: isLast ? 'LRB' : 'LR', h:'center'}));
+      put(rr, 2, (k===0 ? item.driverName : null), boxRowStyle(2, false, isLast, {shrink:true}));
+      for (let c=3;c<=7;c++){
+        const p = item.passengers[k*passPerRow + (c-3)];
+        put(rr, c, p==null ? null : p, boxRowStyle(c, false, isLast, {shrink:true}));
+      }
+      setH(rr, 18);
+    }
+    merges.push(`B${headRow}:B${lastRow}`);
+    setH(lastRow+1, 12); // 次の枠との間の細い行
+    row = lastRow + 2;
+  }
+
+  /* ---- 配車された車 ---- */
+  r.cars.forEach((car, idx)=>{
+    const seats = orderSeatsForDisplay(car.seats);
+    const driverSeat = seats.find(s=>s.kind==='driver');
+    const others = seats.filter(s=>s!==driverSeat).map(s=>seatDisplayName(s));
+    let label = '選手車', font = 'green';
+    if (car.type==='officer'){ label = '役員・指導者車'; font = 'blue'; }
+    else if (car.type==='equipment'){ label = '用具車（タープ・試合用具・指導者用具等）'; font = 'blue'; }
+    else if (carTypeLabel(car.type, car)==='父兄車'){ label = '父兄車'; font = 'magenta'; }
+    writeCarBlock({
+      label, labelFont:font,
+      driverLabel:`運転手${carOrderNumber(idx+1)}`,
+      driverName: driverSeat ? seatDisplayName(driverSeat) : (car.familySurname ? `${car.familySurname}号車` : ''),
+      passengers: others, showPassLabel:true,
+    });
+  });
+  /* ---- 現地集合・解散（家庭の車／指導者・コーチ） ---- */
+  const localFam = r.localArrivalFamilies || [];
+  const localStaff = r.localArrivalStaff || [];
+  localFam.forEach(sn=>{
+    writeCarBlock({label:'現地集合解散', labelFont:'red', driverLabel:`運転手${carOrderNumber(carNo+1)}`, driverName:`${sn}家`, passengers:[], showPassLabel:false});
+  });
+  localStaff.forEach(nm=>{
+    writeCarBlock({label:'現地集合解散', labelFont:'red', driverLabel:`運転手${carOrderNumber(carNo+1)}`, driverName:nm, passengers:[], showPassLabel:false});
+  });
+
+  /* ---- 留め置き枠：指導者・コーチ → 家庭の順に①②③…と番号を付けて並べる（台数と一致）。5名ごとに行を自動で増やす ---- */
+  const heldNames = [...(r.staffHeldBack||[]), ...(r.heldBackFamilies||[])];
+  const heldCount = heldNames.length;
+  setH(row, 18); row++;
+  const heldRows = Math.max(1, Math.ceil(heldCount / 5));
+  const boxTop = row, boxLast = row + heldRows;
+  for (let c=1;c<=7;c++){
+    const L = (c===1) ? 'L' : '', R = (c===7) ? 'R' : '';
+    put(boxTop, c, c===2 ? 'ユキ技研（YUKI）ライフバレー工場駐車場' : null, S({font: c===2?'redreg':'base', border:'T'+L+R}));
+  }
+  setH(boxTop, 24);
+  for (let k=0;k<heldRows;k++){
+    const rr = boxTop + 1 + k, isLast = (rr===boxLast);
+    for (let c=1;c<=7;c++){
+      const L = (c===1) ? 'L' : '', R = (c===7) ? 'R' : '';
+      let v = null, o = {border:(isLast?'B':'')+L+R};
+      if (c===2 && k===0) v = `留め置き　${heldCount}台`;
+      if (c>=3){ const nm = heldNames[k*5 + (c-3)]; if (nm!=null){ v = carOrderNumber(k*5 + (c-3) + 1) + nm; o.shrink = true; } }
+      put(rr, c, v, S(o));
+    }
+    setH(rr, 24);
+  }
+  row = boxLast + 1;
+  setH(row, 15); row++;
+
+  /* ---- 注意書きと台数の集計 ---- */
+  const nStart = row;
+  put(nStart,   2, '※選手の野球道具は、各自乗車する車両へ積み込みをお願いします。', S({font:'bold'}));
+  const legend = [
+    ['配車(選手・用具)', r.cars.length],
+    ['現地集合解散', localFam.length],
+    ['コーチ', localStaff.length],
+    ['留め置き', heldCount],
+  ];
+  legend.forEach((it,i)=>{
+    put(nStart+i, 6, it[0], S({}));
+    put(nStart+i, 7, it[1], S({fmt:176}));
+    setH(nStart+i, 18);
+  });
+  const lastRowNo = nStart + legend.length - 1;
+
+  /* ---- XML組み立て ---- */
+  const sheetRows = Object.keys(rows).map(Number).sort((a,b)=>a-b).map(rr=>{
+    const cells = Object.keys(rows[rr]).map(Number).sort((a,b)=>a-b).map(c=>{
+      const {v,s} = rows[rr][c], a = ref(rr,c);
+      if (v==null || v==='') return `<c r="${a}" s="${s}"/>`;
+      if (typeof v==='number') return `<c r="${a}" s="${s}"><v>${v}</v></c>`;
+      return `<c r="${a}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEsc(v)}</t></is></c>`;
+    }).join('');
+    const ht = heights[rr] ? ` ht="${heights[rr]}" customHeight="1"` : '';
+    return `<row r="${rr}"${ht}>${cells}</row>`;
+  }).join('');
+  // 高さだけ指定した空行（スペーサー）も出力する
+  const filled = new Set(Object.keys(rows).map(Number));
+  const emptyRows = Object.keys(heights).map(Number).filter(rr=>!filled.has(rr));
+  const allRowsXml = (()=>{
+    const map = {};
+    sheetRows.replace(/<row r="(\d+)".*?<\/row>/g, (m,n)=>{ map[n]=m; return m; });
+    emptyRows.forEach(rr=>{ map[rr] = `<row r="${rr}" ht="${heights[rr]}" customHeight="1"/>`; });
+    return Object.keys(map).map(Number).sort((a,b)=>a-b).map(n=>map[n]).join('');
+  })();
+
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><dimension ref="A1:I${lastRowNo}"/><sheetViews><sheetView tabSelected="1" workbookViewId="0" showGridLines="0"/></sheetViews><sheetFormatPr defaultColWidth="14.42578125" defaultRowHeight="15" customHeight="1"/><cols><col min="1" max="1" width="3.140625" customWidth="1"/><col min="2" max="2" width="4.7109375" customWidth="1"/><col min="3" max="8" width="15.85546875" customWidth="1"/><col min="9" max="9" width="2.140625" customWidth="1"/><col min="10" max="11" width="8.7109375" customWidth="1"/></cols><sheetData>${allRowsXml}</sheetData><mergeCells count="${merges.length}">${merges.map(m=>`<mergeCell ref="${m}"/>`).join('')}</mergeCells><pageMargins left="0.51181102362204722" right="0.11811023622047245" top="0.55118110236220474" bottom="0.15748031496062992" header="0" footer="0"/><pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/></worksheet>`;
+
+  const borderXml = borderList.map(b=>{
+    const side = (ch, tag)=> b.indexOf(ch)>=0 ? `<${tag} style="thin"><color rgb="FF000000"/></${tag}>` : `<${tag}/>`;
+    return `<border>${side('L','left')}${side('R','right')}${side('T','top')}${side('B','bottom')}<diagonal/></border>`;
+  }).join('');
+  const xfXml = xfList.map(x=>{
+    const fontId = fontNames.indexOf(x.font) + 1; // 0番は標準フォント
+    const borderId = borderList.indexOf(x.border);
+    return `<xf numFmtId="${x.fmt}" fontId="${fontId}" fillId="0" borderId="${borderId}" xfId="0" applyFont="1"${x.fmt?' applyNumberFormat="1"':''}${borderId?' applyBorder="1"':''} applyAlignment="1"><alignment horizontal="${x.h}" vertical="center"${x.wrap?' wrapText="1"':''}${x.shrink?' shrinkToFit="1"':''}/></xf>`;
+  }).join('');
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="176" formatCode="0&quot;台&quot;"/></numFmts><fonts count="${fontNames.length+1}"><font><sz val="10"/><color rgb="FF000000"/><name val="Calibri"/></font>${fontNames.map(n=>FONTS[n]).join('')}</fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="${borderList.length}">${borderXml}</borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${xfList.length}">${xfXml}</cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+
+  const files = [
+    {name:'[Content_Types].xml', text:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`},
+    {name:'_rels/.rels', text:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
+    {name:'xl/workbook.xml', text:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets><sheet name="配車表" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+    {name:'xl/_rels/workbook.xml.rels', text:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`},
+    {name:'xl/styles.xml', text:stylesXml},
+    {name:'xl/worksheets/sheet1.xml', text:sheetXml},
+  ];
+  return zipStore(files);
+}
+
+/* 配車表をExcel（チーム提出用書式）で共有／ダウンロードする（画像化ライブラリは不要） */
+async function shareAssignmentXlsx(){
+  const d = state.draft;
+  if (!d || !d.result){ alert('配車表が見つかりませんでした。'); return; }
+  let blob;
+  try{ blob = buildAssignmentXlsxBlob(d, d.result); }
+  catch(e){ alert('Excelファイルの作成に失敗しました。'); console.error(e); return; }
+  await shareBlobFile(blob, `配車表_${d.date||'未定'}.xlsx`, XLSX_MIME, buildShareText(d));
+}
+
+/* ファイル（Blob）を、共有シートで共有する。共有できない環境ではダウンロードして代替する */
+async function shareBlobFile(blob, filename, mime, shareText){
+  const file = (typeof File!=='undefined') ? new File([blob], filename, {type:mime}) : null;
+  if (file && navigator.canShare && navigator.canShare({files:[file]})){
+    try{
+      await navigator.share({files:[file], title:shareText, text:shareText});
+      return;
+    }catch(e){
+      if (e && e.name==='AbortError') return; // 共有シートを閉じただけ（キャンセル）
+      /* 未対応などの失敗 → ダウンロードにフォールバック */
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 8000);
+}
+
 /* 作成済みの画像を、選んだ形式（'jpeg'／'pdf'）で共有する。
    共有できない環境では、ファイルをダウンロードして代替する */
 async function shareImageResult(img, format){
@@ -3123,21 +3404,7 @@ async function shareImageResult(img, format){
     }
     filename = img.baseName + '.pdf'; mime = 'application/pdf';
   }
-  const file = (typeof File!=='undefined') ? new File([blob], filename, {type:mime}) : null;
-  if (file && navigator.canShare && navigator.canShare({files:[file]})){
-    try{
-      await navigator.share({files:[file], title:img.shareText, text:img.shareText});
-      return;
-    }catch(e){
-      if (e && e.name==='AbortError') return; // 共有シートを閉じただけ（キャンセル）
-      /* 未対応などの失敗 → ダウンロードにフォールバック */
-    }
-  }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url), 8000);
+  await shareBlobFile(blob, filename, mime, img.shareText);
 }
 
 /* 「共有」を押したときの形式選択（画像JPEG／PDF）。選んだ形式 'jpeg'／'pdf'、キャンセルなら null を返す。
@@ -3152,6 +3419,7 @@ function chooseShareFormat(){
         <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px;">
           <button class="btn" type="button" data-format="jpeg">画像（JPEG）</button>
           <button class="btn" type="button" data-format="pdf">PDF（A4・1ページ）</button>
+          <button class="btn" type="button" data-format="xlsx">Excel（チーム提出用書式）</button>
           <button class="btn ghost" type="button" data-format="">キャンセル</button>
         </div>
       </div>`;
@@ -3172,6 +3440,7 @@ async function exportAssignmentImage(){ // 「共有」ボタン
   try{
     const format = await chooseShareFormat();
     if (!format) return;
+    if (format==='xlsx'){ await shareAssignmentXlsx(); return; } // Excelは画像化せず直接作成
     const img = await buildAssignmentImage();
     if (img) await shareImageResult(img, format);
   } finally { exportBusy = false; }
@@ -3213,7 +3482,8 @@ async function previewAssignmentImage(){
         if (b.dataset.preview==='close') closeAssignmentPreview();
         else if (b.dataset.preview==='share'){
           const format = await chooseShareFormat();
-          if (format) await shareImageResult(img, format);
+          if (format==='xlsx') await shareAssignmentXlsx();
+          else if (format) await shareImageResult(img, format);
         }
         return;
       }
@@ -3338,7 +3608,7 @@ function renderHelp(){
       body: `
       <div class="help-step"><span class="num">1</span><div><b>初期設定</b><br>家族（保護者・選手）と指導者・コーチを登録します。乗車定員や、役員・指導者車／用具車として使えるかどうかもここで設定します。一度登録すれば、次回以降は基本的に触る必要はありません。</div></div>
       <div class="help-step"><span class="num">2</span><div><b>配車登録</b><br>遠征1回ごとに、日付・行先と、参加できる父母・選手、車を出せる家庭（運転手が誰か）を入力します。必要な配車台数を入れておくと、配車回数が少ない家庭から自動で不足分を選ぶこともできます。</div></div>
-      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、「プレビュー」で出力画像を確認したり、「共有」から画像（JPEG）またはPDFとして送ったりできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
+      <div class="help-step"><span class="num">3</span><div><b>配車表</b><br>「この内容で自動配車を作成する」を押すと配車表ができあがります。内容はドロップダウンで手動修正でき、「プレビュー」で出力画像を確認したり、「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）として送ったりできます。問題がなければ「履歴に保存して確定する」を押してください。</div></div>
       <div class="help-step"><span class="num">4</span><div><b>履歴・実績</b><br>確定した配車の履歴と、家庭ごとの配車回数（輪番の参考）を確認できます。アプリを使い始める前の実績は「過去の実績を登録」からまとめて入力できます。</div></div>
       `,
     },
@@ -3369,7 +3639,7 @@ function renderHelp(){
       <ul>
         <li>タブ（使い方／①〜④）が画面に収まらない場合は、左右にスワイプすると切り替えられます。</li>
         <li>表（一覧表）はスマートフォンでは横スクロールせず、1件ずつカード状に表示されます。</li>
-        <li>配車表は「プレビュー」で出力される画像を確認でき、「共有」から画像（JPEG）またはPDFを選んでLINEなどへ直接送れます（共有に未対応のブラウザではファイルがダウンロードされます）。</li>
+        <li>配車表は「プレビュー」で出力される画像を確認でき、「共有」から画像（JPEG）・PDF・Excel（チーム提出用書式）を選んでLINEなどへ直接送れます（共有に未対応のブラウザではファイルがダウンロードされます）。</li>
       </ul>
       `,
     },
