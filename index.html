@@ -363,7 +363,7 @@
   .simple-sheet table.ss-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13.5px;margin-bottom:14px;}
   .simple-sheet .ss-table th{background:#1E3A52;color:#fff;font-size:12px;padding:5px 6px;border:1px solid #8FA0AE;text-align:center;white-space:nowrap;}
   .simple-sheet .ss-table td{border:1px solid #8FA0AE;padding:6px 4px;text-align:center;vertical-align:middle;white-space:nowrap;overflow:hidden;height:20px;}
-  .simple-sheet .ss-table td.no{font-weight:700;}
+  .simple-sheet .ss-table td.no{font-weight:700;font-size:13px;}
   .simple-sheet .ss-table td.lab{font-weight:700;background:#F3F6F9;}
   .simple-sheet .ss-table td.lab.local{color:#B26A00;}
   .simple-sheet .ss-table td.lab.held{color:#A33A2A;}
@@ -3110,13 +3110,22 @@ function buildSimpleExportHtml(d, r){
       others: seats.filter(s=>s!==driverSeat).map(s=>shortName(s)),
     };
   });
+  // 先頭の列は車の種類（コーチ／用具／選手／父兄）。番号は運転手名の頭に付ける（例：①辻潤）
+  const typeShort = (car)=>{
+    const t = carTypeLabel(car.type, car);
+    if (t==='役員・指導者車') return 'コーチ';
+    if (t==='用具車') return '用具';
+    if (t==='父兄車') return '父兄';
+    return '選手';
+  };
+  carRows.forEach((x, idx)=>{ x.typeLabel = typeShort(x.car); x.driverText = carOrderNumber(idx+1) + x.driverName; });
   const P = Math.max(5, ...carRows.map(x=>x.others.length));
   // マスの幅は、実際に表示する最も長い名前に合わせて決める（改行されず、かつ広がりすぎないように）
   const visLen = (t)=>Array.from(String(t)).reduce((a,ch)=>a+(ch.charCodeAt(0)<128?0.6:1),0);
   const widthFor = (names, min)=>Math.max(min, Math.ceil(Math.max(0, ...names.map(visLen))*14 + 14));
   const CELL_W = widthFor([...carRows.flatMap(x=>x.others), ...localNames, ...heldNames], 62);
-  const DRV_W = CELL_W; // 運転手のマスは同乗者のマスと同じ幅にする
-  const NO_W = 44;
+  const DRV_W = Math.max(CELL_W, widthFor(carRows.map(x=>x.driverText), 62)); // 運転手のマスは同乗者のマスと同じ幅（番号付きの名前が収まらない場合のみ少し広げる）
+  const NO_W = 52; // 車の種類（最長『コーチ』の3文字）が収まる幅
   const sheetW = 36 + NO_W + DRV_W + P*CELL_W;
   // 下の表（現地集合解散・留め置き）は、先頭2列を「区分」「台数」に使う（合計幅は上の表の先頭2列と同じ）
   const LAB_W = 64, CNT_W = NO_W + DRV_W - LAB_W; // 「区分」は4文字が収まる幅。台数は同乗者のマスに近い幅になる
@@ -3127,15 +3136,15 @@ function buildSimpleExportHtml(d, r){
     const cells = [];
     for (let i=0;i<P;i++) cells.push(`<td class="nm">${i<x.others.length ? escapeHtml(x.others[i]) : ''}</td>`);
     return `<tr>
-      <td class="no">${carOrderNumber(idx+1)}</td>
-      <td class="nm">${escapeHtml(x.driverName)}</td>
+      <td class="no">${escapeHtml(x.typeLabel)}</td>
+      <td class="nm">${escapeHtml(x.driverText)}</td>
       ${cells.join('')}
     </tr>`;
   }).join('');
   const carTableHtml = `
     <table class="ss-table">
       ${colgroup}
-      <thead><tr><th>No.</th><th>運転手</th><th colspan="${P}">同乗者</th></tr></thead>
+      <thead><tr><th>車種</th><th>運転手</th><th colspan="${P}">同乗者</th></tr></thead>
       <tbody>${carRowsHtml || `<tr><td colspan="${2+P}" style="text-align:center;color:#888;">配車される車がありません</td></tr>`}</tbody>
     </table>`;
 
