@@ -368,6 +368,7 @@
   .simple-sheet .ss-table td.lab.local{color:#B26A00;}
   .simple-sheet .ss-table td.lab.held{color:#A33A2A;}
   .simple-sheet .ss-table td.cnt{font-weight:700;background:#F3F6F9;}
+  .simple-sheet .ss-foot{font-size:11.5px;color:#555;margin-top:-6px;}
   .simple-sheet .ss-warn{border:1px solid #D9A39A;background:#FBECE9;color:#8A2E22;border-radius:6px;padding:6px 10px;font-size:13px;margin-bottom:10px;}
 
   .modal-overlay{
@@ -511,6 +512,7 @@ let state = {
   tempPlayers: null,
   tempOthers: null,
   tempStaff: null,
+  tempSolo: null, // ②「個別の別行動」の選択中の家庭・人（一時的な選択状態）
   tempCarSwap: null, // ③配車表「車両の入れ替え」：選択中の入替え元／入替え先（一時的な選択状態）
   detailHistoryOpen: false,
   detailHistoryDraft: null,
@@ -883,7 +885,7 @@ function reconcileDraft(d){
       (f.players||[]).forEach((p,i)=>{ players['p'+i] = false; });
       const others = {};
       (f.others||[]).forEach((o,i)=>{ others['o'+i] = false; });
-      d.attendance[fid] = {father: false, mother: false, players, others, canDispatch:false, driver:null, localArrival:false, pickupByOther:false, absentAll:false, absentSnapshot:null};
+      d.attendance[fid] = {father: false, mother: false, players, others, canDispatch:false, driver:null, localArrival:false, pickupByOther:false, soloRole:null, absentAll:false, absentSnapshot:null};
     } else {
       (f.players||[]).forEach((p,i)=>{
         const k = 'p'+i;
@@ -897,6 +899,18 @@ function reconcileDraft(d){
       if (d.attendance[fid].absentAll === undefined) d.attendance[fid].absentAll = false;
       if (d.attendance[fid].absentSnapshot === undefined) d.attendance[fid].absentSnapshot = null;
       if (d.attendance[fid].pickupByOther === undefined) d.attendance[fid].pickupByOther = false; // 他家族の送迎（配車不要）
+      // イレギュラー対応：選手のみ配車に乗り、保護者は直行直帰する家庭（旧データ＝該当なし）
+      if (d.attendance[fid].parentsDirect === undefined) d.attendance[fid].parentsDirect = false;
+      if (d.attendance[fid].parentsDirectCount === undefined) d.attendance[fid].parentsDirectCount = 0; // 現地集合解散する保護者の人数（誰かは問わない）
+      if (d.attendance[fid].parentsDirect && (d.attendance[fid].localArrival || d.attendance[fid].absentAll || !d.attendance[fid].pickupByOther)) d.attendance[fid].parentsDirect = false;
+      if (d.attendance[fid].parentsDirect){ d.attendance[fid].canDispatch = false; d.attendance[fid].driver = null; }
+      // 個別の別行動（保護者の一方だけが現地集合解散＝途中参加）。旧データ＝該当なし
+      if (d.attendance[fid].soloRole === undefined) d.attendance[fid].soloRole = null;
+      if (d.attendance[fid].soloHeldBack === undefined) d.attendance[fid].soloHeldBack = false;
+      if (typeof d.attendance[fid].localReason !== 'string') d.attendance[fid].localReason = ''; // 現地集合解散の理由（Excel出力のみに表示）
+      { const _a = d.attendance[fid];
+        if (_a.soloRole && (_a.localArrival || _a.absentAll || _a.parentsDirect || !f[_a.soloRole])) _a.soloRole = null;
+        if (_a.soloRole && _a.driver === _a.soloRole) _a.driver = null; }
     }
   });
   // 指導者・コーチの参加設定。今回「現地集合・解散（localArrival）」を追加したため、
@@ -1132,8 +1146,8 @@ function autoSelectDispatchHouseholds(d){
     const a = attendanceFor(d.attendance, f);
     if (!a || a.localArrival) return false;
     if (f.vehicleRoles && f.vehicleRoles.equipmentOnly) return false;
-    const fatherOk = f.father && a.father;
-    const motherOk = f.mother && a.mother;
+    const fatherOk = f.father && a.father && a.soloRole!=='father';
+    const motherOk = f.mother && a.mother && a.soloRole!=='mother';
     return fatherOk || motherOk;
   });
   candidates.sort((x,y)=>{
@@ -1146,7 +1160,7 @@ function autoSelectDispatchHouseholds(d){
   picks.forEach(f=>{
     const a = attendanceFor(d.attendance, f);
     a.canDispatch = true;
-    a.driver = (f.father && a.father) ? 'father' : ((f.mother && a.mother) ? 'mother' : null);
+    a.driver = (f.father && a.father && a.soloRole!=='father') ? 'father' : ((f.mother && a.mother && a.soloRole!=='mother') ? 'mother' : null);
   });
 
   return {applicable:true, filled:picks.length, shortfall:needed-picks.length};
@@ -1164,7 +1178,7 @@ function autoSelectDispatchHouseholds(d){
    ========================================================= */
 /* =========================================================
    前川号・西脇号 用具車専用ルール（共通ヘルパー）
-   ・前川号：用具車として使う場合、運転手（前川父）1名だけでも正常。選手は絶対に乗せない。
+   ・前川号：用具車として使う場合も、保護者2名以上が必須（他の車と同じ）。選手は絶対に乗せない。
    ・西脇号：用具車として使う場合、通常の絶対条件（保護者2名以上／選手0名 or 2名以上）は
             そのまま維持しつつ、保護者を優先配置し、選手は極力自動配置しない。
    assignCars() の自動配置・repairLoneOccupants() の補正・hardRuleViolations() /
@@ -1254,10 +1268,7 @@ function repairLoneOccupants(allSeatCars, relaxedRules={}){
     allSeatCars.forEach(car=>{
       const parents = parentSeatsOf(car);
       if (parents.length !== 1) return;
-      // ▼前川号 用具車専用ルール：前川父1名（運転手のみ）は正常な状態なので、
-      // 他車から保護者を無理に迎え入れて2名にする補正の対象から除外する。
-      if (isMaekawaEquipmentCar(car)) return;
-      // ▲前川号 用具車専用ルール
+      // 前川号も保護者2名以上が必須のため、他の車と同じく保護者を迎え入れる補正の対象にする
 
       if (seatsLeft(car) <= 0){
         // 満席の場合、選手を1名他の車へ動かして席を空ける
@@ -1352,6 +1363,7 @@ function hardRuleViolations(result, relaxedRules={}){
     // 定員超過や重複と同様に、常に不正配置として絶対条件違反にする。
     if (isMaekawaEquipmentCar(car)){
       if (playerCount > 0) errors.push(`${car.familySurname}号車（用具車）に選手が配置されています。前川号には選手を乗せられません。`);
+      if (!relaxedRules.parentMin2 && parentCount < 2) errors.push(`${car.familySurname}号車は保護者が${parentCount}名です。運転手を含め2名以上必要です。`);
     } else {
       if (!relaxedRules.parentMin2 && parentCount < 2) errors.push(`${car.familySurname}号車は保護者が${parentCount}名です。運転手を含め2名以上必要です。`);
       if (!relaxedRules.playerMin2 && playerCount === 1) errors.push(`${car.familySurname}号車は選手が1名だけです。選手は0名または2名以上必要です。`);
@@ -1627,12 +1639,59 @@ function chooseDispatchPlan(d, historyCounts, coRideCounts, relaxedRules={}){
   return {ok:true, ...best, candidateSurnames, attempts};
 }
 
+/* イレギュラー対応：選手のみ配車に乗り、保護者は直行直帰する家庭（「集合場所まで送迎」を選んだ家庭で設定）。
+   保護者の参加（父・母）の入力内容にかかわらず、その家庭の保護者・兄弟姉妹は乗車しない（車も出さない）ものとして扱い、選手だけを乗車対象にする。
+   元のデータ（誰が参加するか）は書き換えず、計算用の写しだけを作る。 */
+function parentsDirectLabel(r, sn, suffix){
+  const n = (r.parentsDirectCounts||{})[sn] || 0;
+  return sn + suffix + (n ? `（${n}名）` : '');
+}
+function applyParentsDirect(attendance, families){
+  const out = Object.assign({}, attendance);
+  (families||[]).forEach(f=>{
+    const a = attendanceFor(attendance, f);
+    if (a && a.parentsDirect && !a.localArrival && !a.absentAll){
+      out[familyIdentity(f)] = Object.assign({}, a, {father:false, mother:false, canDispatch:false, driver:null, others:{}});
+    } else if (a && a.soloRole && !a.localArrival && !a.absentAll && f[a.soloRole]){
+      // 個別の別行動：父または母の一方だけが現地集合解散（途中参加）。その人は乗車も車出しもしない
+      const o = Object.assign({}, a);
+      o[a.soloRole] = false;
+      if (o.driver === a.soloRole || !o.driver){ o.driver = null; o.canDispatch = false; }
+      out[familyIdentity(f)] = o;
+    }
+  });
+  return out;
+}
+/* 個別の別行動で、理由が未入力の家庭名（登録完了の前に必ず入力してもらう） */
+function soloEntriesWithoutReason(d){
+  if (!d || !d.attendance) return [];
+  return state.families.filter(f=>{
+    const a = attendanceFor(d.attendance, f);
+    return a && a.soloRole && !a.localArrival && !a.absentAll && !a.parentsDirect && f[a.soloRole] && !(typeof a.localReason==='string' && a.localReason.trim());
+  }).map(f=>`${f.surname}家（${soloRoleText(attendanceFor(d.attendance, f).soloRole)}）`);
+}
+function soloRoleText(role){ return role==='father' ? '父' : '母'; }
+function soloLabel(x){ return `${x.surname}（${soloRoleText(x.role)}のみ途中参加）`; }
+/* 別行動になる人が、その家庭の車出し担当（運転手）だった場合の警告 */
+function soloDriverWarnings(attendance, families){
+  const out = [];
+  (families||[]).forEach(f=>{
+    const a = attendanceFor(attendance, f);
+    if (a && a.soloRole && !a.localArrival && !a.absentAll && a.canDispatch && !a.driver){
+      const other = a.soloRole==='father' ? '母' : '父';
+      out.push(`${f.surname}家：${soloRoleText(a.soloRole)}が途中参加（現地集合解散）のため、この家庭は車出しの運転手が未選択です。${other}が運転できる場合は②で運転手を選び直してください。`);
+    }
+  });
+  return out;
+}
 function assignCars({families, staff, attendance, staffAttendance, extraCars, historyCounts, preferences, coRideCounts, selectedSurnames, trialMode, relaxedRules={}}){
   const warnings = [];
   const cars = [];
   let carSeq = 1;
   preferences = preferences || {enabled:false, items:{}};
   coRideCounts = coRideCounts || {};
+  warnings.push(...soloDriverWarnings(attendance, families));
+  attendance = applyParentsDirect(attendance, families);
 
   function prefWeight(key){
     if (!preferences.enabled) return 0;
@@ -1963,7 +2022,6 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
     });
   });
   function siblingCarIsSafe(car){
-    if (isMaekawaEquipmentCar(car)) return true;
     return parentCount(car) >= 2 || !!relaxedRules.parentMin2;
   }
   function trySeatPendingSiblings(){
@@ -2118,10 +2176,58 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
     });
   }
 
+  // 【親子配慮の最終調整（選手側）】選手は1人ずつ順に置くため、先に置かれた選手が
+  // 後から置かれる選手の親の車の席を埋めてしまったり、補正で親子が崩れることがある。
+  // 全員の配置が終わった後に、車をまたいだ選手の移動／入れ替えを試し、
+  // 「親と同じ車に乗っている選手の数」が増える場合だけ採用する。
+  // 絶対条件（選手は0名または2名以上・定員・用具車への選手配置の禁止）は崩さない。
+  function optimizePlayerPlacement(){
+    if (!wParentChild) return;
+    const isP = s=>s.kind==='driver'||s.kind==='parent';
+    const cs = allSeatCars.filter(c=>c.type!=='officer');
+    const playersOf = c=>c.seats.filter(s=>s.kind==='player');
+    const matchOf = c=>{
+      const ps = c.seats.filter(isP);
+      return playersOf(c).filter(pl=>ps.some(x=>x.surname===pl.surname)).length;
+    };
+    const countOk = c=>{
+      const n = playersOf(c).length;
+      return n===0 || n>=2 || !!relaxedRules.playerMin2;
+    };
+    function tryImprove(){
+      for (const A of cs) for (const B of cs){
+        if (A===B) continue;
+        for (const pa of playersOf(A)){
+          // 移動：Bへ（用具車へは入れない）。移動後の両車の選手数が条件を満たす場合のみ
+          if (B.type!=='equipment' && seatsLeft(B)>0){
+            const before = matchOf(A)+matchOf(B);
+            A.seats = A.seats.filter(x=>x!==pa); B.seats.push(pa);
+            if (matchOf(A)+matchOf(B) > before && countOk(A) && countOk(B)) return true;
+            B.seats.pop(); A.seats.push(pa);
+          }
+          // 入れ替え：選手数は変わらないので、用具車が絡む場合は入れ替えない
+          if (A.type==='equipment' || B.type==='equipment') continue;
+          for (const pb of playersOf(B)){
+            if (pa.surname===pb.surname) continue;
+            const before = matchOf(A)+matchOf(B);
+            const ia = A.seats.indexOf(pa), ib = B.seats.indexOf(pb);
+            A.seats[ia] = pb; B.seats[ib] = pa;
+            if (matchOf(A)+matchOf(B) > before) return true;
+            A.seats[ia] = pa; B.seats[ib] = pb;
+          }
+        }
+      }
+      return false;
+    }
+    let g = 0;
+    while (g++ < 200 && tryImprove()){}
+  }
+
   // 【絶対条件・第一優先】保護者（運転手含む）が1名だけ／選手が1名だけの車が
   // 出ないよう、車両をまたいで座席を調整する（車両そのものは動かさない）
   repairLoneOccupants(allSeatCars, relaxedRules);
   optimizeParentPlacement();
+  optimizePlayerPlacement();
 
   // 上記の調整だけではどうしても解消できない場合、絶対条件に違反した状態のまま
   // 配車表に載せるのではなく、対象者を「未配置」として扱う（＝乗車が足りない
@@ -2158,7 +2264,6 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
   //   前川号1台だけが絶対条件未成立として配車候補から消えることを防ぐ。
   const excludedCarIds = new Set();
   allSeatCars.forEach(car=>{
-    if (isMaekawaEquipmentCar(car)) return;
     if (parentCount(car) === 1 && !relaxedRules.parentMin2){
       car.seats.filter(s=>s.kind==='player').forEach(s=> remainingPlayers.push(s));
       // 除外される車に兄弟姉妹が乗っていた場合、座席ごと消してしまわないよう
@@ -2201,52 +2306,11 @@ function assignCars({families, staff, attendance, staffAttendance, extraCars, hi
   }
   warnings.push(...findDuplicatePeople(cars));
 
-  // 現地集合・解散の家庭（配車不要・直接現地に来る車の台数を把握するため）
-  const localArrivalFamilies = families.filter(f=>{
-    const a = attendanceFor(attendance, f);
-    return a && a.localArrival;
-  }).map(f=>f.surname);
-
-  // 参加はするが「配車（車出し）」はしない家庭＝自家用車は集合場所に留め置きとなる家庭
-  // （保護者が参加しており、その家庭の車を今回の配車には使わない場合）
-  // ただし、他のご家族が集合場所まで送迎してくれる場合（pickupByOther）は、
-  // そもそもこの家庭の車が集合場所に来ないため「留め置き」には含めない。
-  const heldBackFamilies = families.filter(f=>{
-    const a = attendanceFor(attendance, f);
-    if (!a || a.localArrival || a.pickupByOther) return false;
-    if (!(a.father || a.mother)) return false;
-    return !usedSurnames.has(familyIdentity(f));
-  }).map(f=>f.surname);
-
-  // 集合場所までの送迎（送り迎え）が必要な家庭＝
-  // ・保護者は参加せず選手のみが参加する家庭（自家用車での参加ではない）
-  // ・または、保護者・選手が参加するが、他のご家族に集合場所まで送迎してもらう場合
-  const transportFamilies = families.filter(f=>{
-    const a = attendanceFor(attendance, f);
-    if (!a || a.localArrival) return false;
-    if (a.pickupByOther) return !!((a.father || a.mother) || (a.players && Object.keys(a.players).some(k=>a.players[k])));
-    if (a.father || a.mother) return false;
-    return !!(a.players && Object.keys(a.players).some(k=>a.players[k]));
-  }).map(f=>f.surname);
-
-  // 今回「現地集合・解散」を選んだ指導者・コーチ（配車表の表示用）
-  const localArrivalStaff = localArrivalStaffNames(staff, staffAttendance);
-
-  // 「チーム車に乗車」する指導者・コーチのうち、集合場所まで保護者の車などで
-  // 送迎してもらう方（＝この方の車は集合場所に来ないため留め置き不要）と、
-  // 送迎がなく自分の車で集合場所まで来て、その車を留め置くことになる方の一覧
-  // （配車表・画像出力の表示用）
-  const staffPickup = (staff||[]).filter(s=>{
-    const sa = staffAttendance[s.name];
-    return !!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival && sa.pickupByOther);
-  }).map(s=>s.name);
-  const staffHeldBack = (staff||[]).filter(s=>{
-    const sa = staffAttendance[s.name];
-    return !!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival && !sa.pickupByOther);
-  }).map(s=>s.name);
+  const {localArrivalFamilies, heldBackFamilies, transportFamilies, parentsDirectFamilies, parentsDirectCounts, soloLocalFamilies, localReasons,
+    localArrivalStaff, staffPickup, staffHeldBack} = computeArrivalLists({families, staff, attendance, staffAttendance, usedSurnames});
 
   const prefViolations = warnings.filter(w=>w.indexOf('【配慮設定】')===0).length;
-  return {prefViolations, cars, unassigned, warnings, localArrivalFamilies, heldBackFamilies, transportFamilies,
+  return {prefViolations, cars, unassigned, warnings, localArrivalFamilies, heldBackFamilies, transportFamilies, parentsDirectFamilies, parentsDirectCounts, soloLocalFamilies, localReasons,
     officerCarActive, localArrivalStaff, staffPickup, staffHeldBack};
 }
 
@@ -2267,6 +2331,226 @@ function findDuplicatePeople(cars){
     .map(k=>`${labels[k]}さんが複数の車に重複して配車されています。サポートコーチの同乗指定や、選手・保護者の重複がないかご確認ください。`);
 }
 
+/* 現地集合・解散／留め置き／送迎／保護者は現地集合解散 などの一覧を、参加設定と「使われた車」から求める。
+   自動配車の最後と、配車表の部分修正のどちらからも使う。 */
+function computeArrivalLists({families, staff, attendance, staffAttendance, usedSurnames}){
+  // 現地集合・解散の家庭（配車不要・直接現地に来る車の台数を把握するため）
+  const localArrivalFamilies = families.filter(f=>{
+    const a = attendanceFor(attendance, f);
+    return a && a.localArrival;
+  }).map(f=>f.surname);
+  // 参加はするが「配車（車出し）」はしない家庭＝自家用車は集合場所に留め置きとなる家庭
+  // （保護者が参加しており、その家庭の車を今回の配車には使わない場合）
+  // ただし、他のご家族が集合場所まで送迎してくれる場合（pickupByOther）は、
+  // そもそもこの家庭の車が集合場所に来ないため「留め置き」には含めない。
+  const heldBackFamilies = families.filter(f=>{
+    const a = attendanceFor(attendance, f);
+    if (!a || a.localArrival || a.pickupByOther) return false;
+    // 個別の別行動の家庭：別行動の人の車は現地集合解散の1台。残りの家族（配車に乗る人）は、ほかの家庭と同じ判定（車出しなら配車、車出しなしなら留め置き、送迎ありなら留め置きなし）に従う
+    if (!(a.father || a.mother)) return false;
+    return !usedSurnames.has(familyIdentity(f));
+  }).map(f=>f.surname);
+
+  // 集合場所までの送迎（送り迎え）が必要な家庭＝
+  // ・保護者は参加せず選手のみが参加する家庭（自家用車での参加ではない）
+  // ・または、保護者・選手が参加するが、他のご家族に集合場所まで送迎してもらう場合
+  const transportFamilies = families.filter(f=>{
+    const a = attendanceFor(attendance, f);
+    if (!a || a.localArrival || a.parentsDirect) return false; // 選手のみ配車（保護者は直行直帰）の家庭は別枠で表示する
+    if (a.soloRole && !a.pickupByOther) return false; // 個別の別行動の家庭は別枠で表示する
+    if (a.pickupByOther) return !!((a.father || a.mother) || (a.players && Object.keys(a.players).some(k=>a.players[k])));
+    if (a.father || a.mother) return false;
+    return !!(a.players && Object.keys(a.players).some(k=>a.players[k]));
+  }).map(f=>f.surname);
+
+  // イレギュラー：選手のみ配車に乗り、保護者は直行直帰する家庭（保護者の車は現地へ直接向かう）
+  const parentsDirectFamilies = families.filter(f=>{
+    const a = attendanceFor(attendance, f);
+    return !!(a && a.parentsDirect && !a.localArrival && !a.absentAll);
+  }).map(f=>f.surname);
+  // その家庭の保護者の人数（誰が、ではなく人数だけ。未入力は0）
+  const parentsDirectCounts = {};
+  families.forEach(f=>{
+    const a = attendanceFor(attendance, f);
+    if (a && a.parentsDirect && !a.localArrival && !a.absentAll) parentsDirectCounts[f.surname] = Math.max(0, parseInt(a.parentsDirectCount,10) || 0);
+  });
+
+  // 個別の別行動：父または母の一方だけが現地集合解散（途中参加）する家庭。その人の車を現地集合解散の1台として数える
+  const soloLocalFamilies = families.filter(f=>{
+    const a = attendanceFor(attendance, f);
+    return !!(a && a.soloRole && !a.localArrival && !a.absentAll && !a.parentsDirect && f[a.soloRole]);
+  }).map(f=>({surname:f.surname, role:attendanceFor(attendance, f).soloRole}));
+
+  // 現地集合解散の理由（家庭ごと。Excel出力のみに表示する）
+  const localReasons = {};
+  families.forEach(f=>{
+    const a = attendanceFor(attendance, f);
+    const reason = a && typeof a.localReason==='string' ? a.localReason.trim() : '';
+    if (!reason) return;
+    if (localArrivalFamilies.includes(f.surname) || parentsDirectFamilies.includes(f.surname) || soloLocalFamilies.some(x=>x.surname===f.surname)) localReasons[f.surname] = reason;
+  });
+
+  // 今回「現地集合・解散」を選んだ指導者・コーチ（配車表の表示用）
+  const localArrivalStaff = localArrivalStaffNames(staff, staffAttendance);
+
+  // 「チーム車に乗車」する指導者・コーチのうち、集合場所まで保護者の車などで
+  // 送迎してもらう方（＝この方の車は集合場所に来ないため留め置き不要）と、
+  // 送迎がなく自分の車で集合場所まで来て、その車を留め置くことになる方の一覧
+  // （配車表・画像出力の表示用）
+  const staffPickup = (staff||[]).filter(s=>{
+    const sa = staffAttendance[s.name];
+    return !!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival && sa.pickupByOther);
+  }).map(s=>s.name);
+  // サポートコーチは、家庭の父・母と同一人物として紐づいている（linkedSurname）。
+  // その家庭がすでに「留め置き（家庭）」に入っている場合、同じ1台を指導者側でも数えると
+  // 留め置き台数が二重になるため、家庭側の1台だけを残して指導者側からは外す。
+  const heldBackFamilySet = new Set(heldBackFamilies);
+  const staffHeldBack = (staff||[]).filter(s=>{
+    const sa = staffAttendance[s.name];
+    if (!(sa && sa.attend && sa.rideOfficerCar && !sa.localArrival && !sa.pickupByOther)) return false;
+    if (s.linkedSurname){
+      const lf = familyBySurname(s.linkedSurname);
+      if (lf && heldBackFamilySet.has(lf.surname)) return false;
+    }
+    return true;
+  }).map(s=>s.name);
+
+  return {localArrivalFamilies, heldBackFamilies, transportFamilies, parentsDirectFamilies, parentsDirectCounts, soloLocalFamilies, localReasons,
+    localArrivalStaff, staffPickup, staffHeldBack};
+}
+
+/* =========================================================
+   ②配車登録を修正したあと、前の配車表を残したまま、変更点だけを反映する（部分修正）
+   ・不参加／参加しなくなった人は、乗っている車から外す
+   ・運転手が不参加、車出し不可、運転手の変更などで成り立たなくなった車は取り消し、
+     乗っていた人は「未配置」に戻す（③の「乗車先」から手動で割り当て直せる）
+   ・新しく参加する人は「未配置」に入れる（車は自動では追加しない）
+   ・③での手動修正（乗車先の変更など）は、そのまま引き継ぐ
+   元のデータ（d.result）は書き換えず、反映後の結果と、事前確認用の説明文を返す。
+   ========================================================= */
+function reconcileAssignment(d){
+  const result = JSON.parse(JSON.stringify(d.result));
+  const eff = applyParentsDirect(d.attendance, state.families);
+  const staffAtt = d.staffAttendance || {};
+  const want = new Map(); // 今回乗車する人（key → 座席データ）
+  const linkedExcl = new Set(); // 役員・指導者車に乗るサポートコーチと同一人物の保護者（一般車の対象から外す）
+  (state.staff||[]).forEach(st=>{
+    if (!st.linkedSurname || !st.linkedRole) return;
+    const sa = staffAtt[st.name];
+    if (sa && sa.attend && sa.rideOfficerCar && !sa.localArrival){
+      const lf = familyBySurname(st.linkedSurname);
+      linkedExcl.add(`${lf ? familyIdentity(lf) : st.linkedSurname}-${st.linkedRole}`);
+    }
+  });
+  state.families.forEach(f=>{
+    const a = attendanceFor(eff, f);
+    if (!a || a.localArrival) return;
+    const fid = familyIdentity(f);
+    if (f.father && a.father && !linkedExcl.has(`${fid}-father`)){
+      want.set(`${fid}-father`, {key:`${fid}-father`, label:f.father.name, kind:'parent', gender:'father', surname:f.surname, personName:f.father.name});
+    }
+    if (f.mother && a.mother && !linkedExcl.has(`${fid}-mother`)){
+      want.set(`${fid}-mother`, {key:`${fid}-mother`, label:f.mother.name, kind:'parent', gender:'mother', surname:f.surname, personName:f.mother.name});
+    }
+    (f.players||[]).forEach((pl, idx)=>{
+      if (a.players && a.players['p'+idx]){
+        want.set(`${fid}-player-${idx}`, {key:`${fid}-player-${idx}`, label:`${pl.number||''} ${f.surname} ${pl.name||''}`.replace(/\s+/g,' ').trim(), kind:'player', surname:f.surname, playerIdx:idx, number:pl.number||''});
+      }
+    });
+    (f.others||[]).forEach((ot, idx)=>{
+      if (a.others && a.others['o'+idx]){
+        want.set(`${fid}-sibling-${idx}`, {key:`${fid}-sibling-${idx}`, label:(ot.name||'').trim(), kind:'sibling', surname:f.surname});
+      }
+    });
+  });
+  (state.staff||[]).forEach(st=>{
+    const sa = staffAtt[st.name];
+    if (sa && sa.attend && sa.rideOfficerCar && !sa.localArrival){
+      want.set('staff-'+st.name, {key:'staff-'+st.name, label:st.name, kind:'staff', surname:null, personName:st.name});
+    }
+  });
+
+  const removedPeople = [];      // 配車表から外れる人（不参加など）
+  const removedCars = [];        // 取り消す車（運転手の不参加・車出し不可など）
+  const returnedToUnassigned = []; // 取り消した車から未配置に戻る人
+  const toUnassigned = [];
+  const asPassenger = (seat)=> seat.kind==='driver' ? Object.assign({}, seat, {kind:'parent'}) : seat;
+
+  const keptCars = [];
+  result.cars.forEach(car=>{
+    const fam = familyBySurname(car.familyId || car.familySurname);
+    const a = fam ? attendanceFor(eff, fam) : null;
+    const driverSeat = car.seats.find(s=>s.kind==='driver');
+    let valid = !!(fam && a && driverSeat && want.has(driverSeat.key) && !a.pickupByOther);
+    if (valid && car.type==='general') valid = !!(a.canDispatch && a.driver===car.driverRole);
+    if (!valid){
+      removedCars.push(`${car.familySurname}号車`);
+      car.seats.forEach(sd=>{
+        if (want.has(sd.key)){ toUnassigned.push(asPassenger(sd)); returnedToUnassigned.push(seatDisplayName(sd)); }
+        else removedPeople.push(seatDisplayName(sd));
+      });
+      return;
+    }
+    car.seats = car.seats.filter(sd=>{
+      if (want.has(sd.key)) return true;
+      removedPeople.push(seatDisplayName(sd));
+      return false;
+    });
+    keptCars.push(car);
+  });
+  result.cars = keptCars;
+  result.unassigned = (result.unassigned||[]).filter(sd=>{
+    if (want.has(sd.key)) return true;
+    removedPeople.push(seatDisplayName(sd));
+    return false;
+  });
+  toUnassigned.forEach(sd=>result.unassigned.push(sd));
+
+  // 新しく参加することになった人は未配置へ（車は自動では追加しない）
+  const present = new Set([...result.cars.flatMap(c=>c.seats.map(sd=>sd.key)), ...result.unassigned.map(sd=>sd.key)]);
+  const addedPeople = [];
+  want.forEach((seat, key)=>{
+    if (!present.has(key)){ result.unassigned.push(seat); addedPeople.push(seatDisplayName(seat)); }
+  });
+
+  // 現地集合・留め置き・送迎などの一覧を、変更後の参加設定と車の使用状況から求め直す
+  const usedSurnames = new Set(result.cars.map(c=>{
+    const f = familyBySurname(c.familyId || c.familySurname);
+    return f ? familyIdentity(f) : (c.familyId || c.familySurname);
+  }));
+  Object.assign(result, computeArrivalLists({families:state.families, staff:state.staff, attendance:eff, staffAttendance:staffAtt, usedSurnames}));
+  result.selectionSummary = '前の配車表を引き継ぎ、②の変更点だけを反映しました';
+  recomputeWarnings(result, state.families, d.relaxedRules||{});
+
+  // ---- 事前確認用の説明文
+  const names = (arr)=>[...new Set(arr)].join('、');
+  const lines = [];
+  const changed = removedPeople.length || removedCars.length || addedPeople.length;
+  if (!changed){
+    lines.push('②の内容は、前の配車表と食い違う点がありません（参加者・運転手の変更なし）。');
+  } else {
+    lines.push('【前の配車表に②の変更を反映すると】');
+    if (removedPeople.length) lines.push(`・配車表から外れる人：${names(removedPeople)}`);
+    if (removedCars.length) lines.push(`・取り消される車：${names(removedCars)}${returnedToUnassigned.length ? `（乗っていた ${names(returnedToUnassigned)} は未配置に戻ります）` : ''}`);
+    if (addedPeople.length) lines.push(`・新しく未配置に入る人：${names(addedPeople)}`);
+  }
+  const cautions = [];
+  const oldWarn = new Set(d.result.warnings||[]);
+  // 未配置の件数は上の説明で伝えるため、同じ内容の警告は重ねて出さない
+  const newWarn = (result.warnings||[]).filter(w=>!oldWarn.has(w) && w.indexOf('配車しきれなかった参加者')<0);
+  if (removedCars.length) cautions.push('車が取り消された分、台数が減ります。車は自動では追加されません。');
+  if (result.unassigned.length) cautions.push(`未配置が${result.unassigned.length}名になります。③の「乗車先」から手動で割り当ててください。空席が足りない場合は、自動配車の作り直しが必要です。`);
+  newWarn.slice(0, 4).forEach(w=>cautions.push(w));
+  if (newWarn.length > 4) cautions.push(`ほか${newWarn.length-4}件の注意が出ます。`);
+  if ((d.carSwaps||[]).length) cautions.push('「車両の入れ替え」の設定があります。部分修正では再計算されないため、結果をご確認ください。');
+  cautions.push('自動配車と違い、配車回数による輪番の見直しは行われません。車を増やしたい・全体を組み直したいときは「新しく自動配車を作成」を選んでください。');
+  lines.push('');
+  lines.push('【事前に確認してほしい点】');
+  cautions.forEach(c=>lines.push('・'+c));
+  if (d.manualAssignmentEditsPending) lines.push('・③での手動修正は、そのまま引き継がれます。');
+  return {result, message: lines.join('\n'), changed};
+}
+
 function recomputeWarnings(result, families, relaxedRules={}){
   const warnings = [];
   const allSeatCars = result.cars.filter(c=>c.type!=='officer');
@@ -2279,6 +2563,9 @@ function recomputeWarnings(result, families, relaxedRules={}){
     if (isMaekawaEquipmentCar(car)){
       if (players > 0){
         warnings.push(`【前川号・用具車専用ルール】${car.familySurname}号車に選手が配置されています。前川号には選手を乗せられません。`);
+      }
+      if (pc < 2 && !relaxedRules.parentMin2){
+        warnings.push(`【絶対条件】${car.familySurname}号車は保護者が${pc}名です。運転手を含め2名以上必要です。`);
       }
     } else {
       if (pc < 2 && !relaxedRules.parentMin2){
@@ -2393,6 +2680,7 @@ function renderAssignment(){
   const d = state.draft;
   const r = d.result;
   const isValid = r.valid !== false && !(r.hardErrors && r.hardErrors.length);
+  const exportBlockReasons = assignmentBlockReasons(r);
 
   const relaxOptions = r.relaxOptions || getRelaxOptions();
   const relaxedNow = d.relaxedRules || {};
@@ -2535,11 +2823,13 @@ function renderAssignment(){
   const localArrivalList = r.localArrivalFamilies || [];
   const heldBackList = r.heldBackFamilies || [];
   const transportList = r.transportFamilies || [];
+  const parentsDirectList = r.parentsDirectFamilies || [];
+  const soloList = r.soloLocalFamilies || [];
   const localStaffList = r.localArrivalStaff || [];
   const staffPickupList = r.staffPickup || [];
   const staffHeldBackList = r.staffHeldBack || [];
   const anyMoreAfter = (...lists)=>lists.some(l=>l.length);
-  const localInfoHtml = (localArrivalList.length || heldBackList.length || transportList.length || localStaffList.length || staffPickupList.length || staffHeldBackList.length) ? `
+  const localInfoHtml = (localArrivalList.length || parentsDirectList.length || soloList.length || heldBackList.length || transportList.length || localStaffList.length || staffPickupList.length || staffHeldBackList.length) ? `
     <hr class="rule">
     ${localStaffList.length ? `
     <div style="margin-bottom:${anyMoreAfter(localArrivalList, heldBackList, transportList, staffPickupList, staffHeldBackList) ? '10px' : '0'};">
@@ -2555,6 +2845,16 @@ function renderAssignment(){
     <div style="margin-bottom:${anyMoreAfter(localArrivalList, heldBackList, transportList) ? '10px' : '0'};">
       <span class="pill">指導者・コーチ　車を留め置き　${staffHeldBackList.length}名</span>
       <div class="small-muted" style="margin-top:4px;">${staffHeldBackList.map(n=>escapeHtml(n)).join('、')}</div>
+    </div>` : ''}
+    ${parentsDirectList.length ? `
+    <div style="margin-bottom:10px;">
+      <span class="pill gold">選手のみ配車・保護者は現地集合解散　${parentsDirectList.length}家庭</span>
+      <div class="small-muted" style="margin-top:4px;">${parentsDirectList.map(sn=>escapeHtml(parentsDirectLabel(r, sn, '家'))).join('、')}</div>
+    </div>` : ''}
+    ${soloList.length ? `
+    <div style="margin-bottom:10px;">
+      <span class="pill gold">個別の別行動（途中参加）　${soloList.length}台</span>
+      <div class="small-muted" style="margin-top:4px;">${soloList.map(x=>escapeHtml(soloLabel(x))).join('、')}</div>
     </div>` : ''}
     ${localArrivalList.length ? `
     <div style="margin-bottom:${(heldBackList.length || transportList.length) ? '10px' : '0'};">
@@ -2622,10 +2922,11 @@ function renderAssignment(){
   <div class="card" style="display:flex;gap:10px;flex-wrap:wrap;">
     ${(!d.editingEventId || d.hasRegistrationSnapshot) ? `<button class="btn ghost" data-action="back-to-register" type="button">${d.editingEventId?'②配車登録に戻って条件を変更する':'②配車登録に戻って修正'}</button>` : ''}
     ${d.editingEventId ? `<button class="btn ghost" data-action="cancel-edit-history" type="button">保存せずに履歴一覧へ戻る</button>` : ''}
-    <button class="btn ghost" data-action="preview-image" type="button">プレビュー</button>
-    <button class="btn ghost" data-action="export-image" type="button">共有</button>
+    <button class="btn ghost" data-action="preview-image" type="button" ${exportBlockReasons.length?'disabled style="opacity:.45;cursor:not-allowed;"':''}>プレビュー</button>
+    <button class="btn ghost" data-action="export-image" type="button" ${exportBlockReasons.length?'disabled style="opacity:.45;cursor:not-allowed;"':''}>共有</button>
     <button class="btn ${isValid?'':'danger'}" data-action="save-history" ${isValid?'':'title="絶対条件が満たされていません。保存前に確認が表示されます。"'}>${isValid?'履歴に保存して確定する':'絶対条件未達のまま保存する'}</button>
   </div>
+  ${exportBlockReasons.length ? `<div class="warn-box" style="margin-top:-6px;"><b>プレビュー・共有は、次の問題が解消するまで使えません</b>${exportBlockReasons.map(x=>'・'+escapeHtml(x)).join('<br>')}</div>` : ''}
   <p class="small-muted" style="margin-top:-6px;">「プレビュー」で出力される画像を確認できます（「完成版」と「簡易表」を切り替え可能）。総務内のLINE確認には、直行直帰・留め置きの台数と該当者が分かる「簡易表」が便利です。スマートフォンでは「共有」から簡易表・画像（JPEG）・PDF・Excel（チーム提出用書式）を選んで、LINEやGoogleドライブなどに直接送れます（未対応のブラウザではファイルがダウンロードされます）。</p>
   `;
 }
@@ -2955,6 +3256,8 @@ function buildExportHtml(d, r){
   const localArrivalList = r.localArrivalFamilies || [];
   const heldBackList = r.heldBackFamilies || [];
   const transportList = r.transportFamilies || [];
+  const parentsDirectList = r.parentsDirectFamilies || [];
+  const soloList = r.soloLocalFamilies || [];
   const localStaffList = r.localArrivalStaff || [];
   const staffPickupList = r.staffPickup || [];
   const staffHeldBackList = r.staffHeldBack || [];
@@ -2973,6 +3276,16 @@ function buildExportHtml(d, r){
     extraHtml += `
     <div class="export-section-title">現地集合・解散（${localArrivalList.length}家庭）</div>
     <div class="export-note">${localArrivalList.map(sn=>escapeHtml(sn)+'家').join('、')}</div>`;
+  }
+  if (parentsDirectList.length){
+    extraHtml += `
+    <div class="export-section-title">選手のみ配車・保護者は現地集合解散（${parentsDirectList.length}家庭）</div>
+    <div class="export-note">${parentsDirectList.map(sn=>escapeHtml(sn)+'家').join('、')}</div>`;
+  }
+  if (soloList.length){
+    extraHtml += `
+    <div class="export-section-title">個別の別行動（途中参加）（${soloList.length}台）</div>
+    <div class="export-note">${soloList.map(x=>escapeHtml(soloLabel(x))).join('、')}</div>`;
   }
   if (heldBackList.length){
     extraHtml += `
@@ -3006,6 +3319,12 @@ function buildExportHtml(d, r){
   let localParentCount = 0, localPlayerCount = 0, localSiblingCount = 0;
   state.families.forEach(f=>{
     const a = attendanceFor(d.attendance, f);
+    if (a && a.parentsDirect && !a.localArrival && !a.absentAll){
+      // 選手のみ配車の家庭：選手は「配車で行く」に含まれる。保護者は入力された人数を現地集合・解散に加える
+      localParentCount += (r.parentsDirectCounts||{})[f.surname] || 0;
+      return;
+    }
+    if (a && a.soloRole && !a.localArrival && !a.absentAll && f[a.soloRole] && a[a.soloRole]) localParentCount++; // 個別の別行動の保護者1名は現地集合・解散に数える
     if (!a || !a.localArrival) return;
     if (f.father && a.father) localParentCount++;
     if (f.mother && a.mother) localParentCount++;
@@ -3091,7 +3410,10 @@ function buildSimpleExportHtml(d, r){
     return shortParentName(n); // 上記以外（例：サポートコーチとして登録された保護者の氏名）は保護者と同じ短縮
   };
   // 名前は家庭もコーチも同じ欄にまとめる（名前で区別できるため分けない）
-  const localNames = [...(r.localArrivalFamilies||[]).map(sn=>sn+'家'), ...(r.localArrivalStaff||[]).map(shortStaffName)];
+  // 「○○親」＝選手のみ配車に乗り、保護者は直行直帰する家庭（イレギュラー）。保護者の車1台として直行直帰に数える
+  const parentsDirectNames = (r.parentsDirectFamilies||[]).map(sn=>sn+'親');
+  const soloNames = (r.soloLocalFamilies||[]).map(x=>x.surname+soloRoleText(x.role));
+  const localNames = [...(r.localArrivalFamilies||[]).map(sn=>sn+'家'), ...parentsDirectNames, ...soloNames, ...(r.localArrivalStaff||[]).map(shortStaffName)];
   const heldNames = [...(r.staffHeldBack||[]).map(shortStaffName), ...(r.heldBackFamilies||[]).map(sn=>sn+'家')];
 
   // 同乗者のマス数＝車ごとの同乗者数の最大（最低5）。現地集合解散・留め置きの表も同じ列幅に揃える
@@ -3181,6 +3503,8 @@ function buildSimpleExportHtml(d, r){
     ${unassignedHtml}
     ${carTableHtml}
     ${infoTableHtml}
+    ${parentsDirectNames.length ? '<div class="ss-foot">※「○○親」＝選手のみ配車に乗り、保護者は現地集合解散</div>' : ''}
+    ${soloNames.length ? '<div class="ss-foot">※「○○父」「○○母」＝その保護者のみ途中参加（現地集合解散）。ほかの家族は配車に乗ります</div>' : ''}
   </div>`;
 }
 
@@ -3417,15 +3741,63 @@ function buildAssignmentXlsxBlob(d, r){
       passengers: others, showPassLabel:true,
     });
   });
-  /* ---- 現地集合・解散（家庭の車／指導者・コーチ） ---- */
+  /* ---- 現地集合解散の枠（1つの枠に、家庭・コーチを①②③…の番号つきで横に並べる）----
+     家庭の車（選手のみ配車に乗る家庭の保護者の車も含む）と、現地集合・解散のコーチが対象。
+     途中参加の家庭（選手のみ配車・保護者は現地集合解散）は、名前の下の行に「（途中参加）」と表記する。 */
   const localFam = r.localArrivalFamilies || [];
   const localStaff = r.localArrivalStaff || [];
-  localFam.forEach(sn=>{
-    writeCarBlock({label:'現地集合解散', labelFont:'red', driverLabel:`運転手${carOrderNumber(carNo+1)}`, driverName:`${sn}家`, passengers:[], showPassLabel:false});
-  });
-  localStaff.forEach(nm=>{
-    writeCarBlock({label:'現地集合解散', labelFont:'red', driverLabel:`運転手${carOrderNumber(carNo+1)}`, driverName:nm, passengers:[], showPassLabel:false});
-  });
+  // 途中参加：「集合場所まで送迎」＋「保護者は現地集合解散」を選んだ家庭（選手のみ配車に乗り、保護者は現地へ直接向かう）
+  const localItems = [
+    ...localFam.map(sn=>({name:sn, late:false, reason:(r.localReasons||{})[sn]||''})),
+    ...(r.parentsDirectFamilies||[]).map(sn=>({name:sn, late:true, note:'（途中参加）', reason:(r.localReasons||{})[sn]||''})),
+    ...(r.soloLocalFamilies||[]).map(x=>({name:x.surname, late:true, note:`（${soloRoleText(x.role)}のみ途中参加）`, reason:(r.localReasons||{})[x.surname]||''})),
+    ...localStaff.map(nm=>({name:nm, late:false})),
+  ];
+  const localCount = localItems.length;
+  if (localCount){
+    setH(row, 18); row++; // 車の枠との間の空行
+    const perRow = 6; // C〜H列の6マス
+    const groups = [];
+    for (let i=0;i<localItems.length;i+=perRow) groups.push(localItems.slice(i, i+perRow));
+    // 枠の中の行を先に数えて、最後の行に下罫線を付ける
+    const plan = [];
+    groups.forEach(g=>{ plan.push({type:'name', items:g}); if (g.some(it=>it.late)) plan.push({type:'note', items:g}); });
+    const topRow = row;
+    for (let c=1;c<=7;c++){
+      const L = (c===1) ? 'L' : '', R = (c===7) ? 'R' : '';
+      put(topRow, c, c===1 ? '現地集合解散' : null, S({font: c===1?'red':'base', border:'T'+L+R}));
+    }
+    setH(topRow, 18);
+    plan.forEach((pl, k)=>{
+      const rr = topRow + 1 + k, isLast = (k===plan.length-1);
+      for (let c=1;c<=7;c++){
+        const L = (c===1) ? 'L' : '', R = (c===7) ? 'R' : '';
+        let v = null; const o = {border:(isLast?'B':'')+L+R};
+        if (c>=2){
+          const idx = c-2, it = pl.items[idx];
+          if (it){
+            if (pl.type==='name'){
+              const no = groups.indexOf(pl.items) * perRow + idx + 1;
+              v = carOrderNumber(no) + it.name; o.shrink = true;
+            } else if (it.late){
+              v = it.note || '（途中参加）'; o.shrink = true;
+            }
+          }
+        }
+        put(rr, c, v, S(o));
+      }
+      setH(rr, 18);
+    });
+    row = topRow + plan.length + 1;
+    // 現地集合解散の理由は、枠の外に「①内田：理由」の形で1行ずつ表示する（番号は枠内の番号と同じ）
+    const reasonLines = [];
+    localItems.forEach((it, i)=>{ if (it.reason) reasonLines.push(carOrderNumber(i+1) + it.name + '：' + it.reason); });
+    if (reasonLines.length){
+      setH(row, 6); row++;
+      reasonLines.forEach(txt=>{ put(row, 1, txt, S({})); setH(row, 18); row++; });
+    }
+    setH(row, 12); row++; // 枠の下の細い行
+  }
 
   /* ---- 留め置き枠：指導者・コーチ → 家庭の順に①②③…と番号を付けて並べる（台数と一致）。5名ごとに行を自動で増やす ---- */
   const heldNames = [...(r.staffHeldBack||[]), ...(r.heldBackFamilies||[])];
@@ -3435,7 +3807,7 @@ function buildAssignmentXlsxBlob(d, r){
   const boxTop = row, boxLast = row + heldRows;
   for (let c=1;c<=7;c++){
     const L = (c===1) ? 'L' : '', R = (c===7) ? 'R' : '';
-    put(boxTop, c, c===2 ? 'ユキ技研（YUKI）ライフバレー工場駐車場' : null, S({font: c===2?'redreg':'base', border:'T'+L+R}));
+    put(boxTop, c, c===1 ? 'ユキ技研（YUKI）ライフバレー工場駐車場' : null, S({font: c===1?'red':'base', border:'T'+L+R}));
   }
   setH(boxTop, 24);
   for (let k=0;k<heldRows;k++){
@@ -3455,10 +3827,11 @@ function buildAssignmentXlsxBlob(d, r){
   /* ---- 注意書きと台数の集計 ---- */
   const nStart = row;
   put(nStart,   2, '※選手の野球道具は、各自乗車する車両へ積み込みをお願いします。', S({font:'bold'}));
+  put(nStart+1, 2, '※積みきれないクーラーボックスは分散積載にご協力ください。', S({font:'bold'}));
+  // 台数集計：配車（選手・用具）／現地集合解散（家庭・コーチをまとめた台数。途中参加の家庭も含む）／留め置き
   const legend = [
     ['配車(選手・用具)', r.cars.length],
-    ['現地集合解散', localFam.length],
-    ['コーチ', localStaff.length],
+    ['現地集合解散', localCount],
     ['留め置き', heldCount],
   ];
   legend.forEach((it,i)=>{
@@ -3598,7 +3971,27 @@ async function shareSimpleImage(cached){
 }
 
 let exportBusy = false;
+/* 配車しきれない参加者や、確認が必要な問題がある間は、プレビュー・共有に進めない（配慮設定の注意だけは対象外） */
+function assignmentBlockReasons(r){
+  const out = [];
+  if (!r) return out;
+  if ((r.unassigned||[]).length) out.push(`未配置の参加者が${r.unassigned.length}名います`);
+  if (r.valid === false || (r.hardErrors && r.hardErrors.length)) out.push('絶対条件が満たされていません');
+  (r.warnings||[]).forEach(w=>{
+    if (w.indexOf('【配慮設定】')===0) return;
+    if (w.indexOf('配車しきれなかった参加者')===0) return; // 未配置の件数として上で表示済み
+    out.push(w);
+  });
+  return out;
+}
+function alertIfExportBlocked(){
+  const reasons = assignmentBlockReasons(state.draft && state.draft.result);
+  if (!reasons.length) return false;
+  alert('問題が解消するまで、プレビュー・共有はできません。\n\n' + reasons.map(x=>'・'+x).join('\n') + '\n\n②に戻って修正するか、③で未配置の参加者を割り当ててください。');
+  return true;
+}
 async function exportAssignmentImage(){ // 「共有」ボタン
+  if (alertIfExportBlocked()) return;
   if (exportBusy) return;
   exportBusy = true;
   try{
@@ -3622,6 +4015,7 @@ function closeAssignmentPreview(){
   }
 }
 async function previewAssignmentImage(){
+  if (alertIfExportBlocked()) return;
   if (exportBusy) return;
   exportBusy = true;
   try{
@@ -3775,6 +4169,19 @@ function render(){
         <div class="row-actions" style="justify-content:flex-end;gap:8px;">
           <button class="btn ghost small" data-action="confirm-cancel" type="button">キャンセル</button>
           <button class="btn danger small" data-action="confirm-ok" type="button">はい</button>
+        </div>
+      </div>
+    </div>` : ''}
+    ${state.regenChoice ? `
+    <div class="modal-overlay confirm-overlay">
+      <div class="card" style="max-width:460px;max-height:86vh;overflow:auto;">
+        <h3 style="margin:0 0 8px;">配車表の作り方を選択</h3>
+        <p class="desc" style="margin:0 0 8px;">すでに配車表があります。②の変更をどう反映しますか？</p>
+        <p class="desc" style="white-space:pre-wrap;margin:0 0 14px;font-size:12.5px;">${escapeHtml(state.regenChoice.message)}</p>
+        <div class="row-actions" style="justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+          <button class="btn ghost small" data-action="regen-choice-cancel" type="button">キャンセル</button>
+          <button class="btn ghost small" data-action="regen-choice-new" type="button">新しく自動配車を作成</button>
+          <button class="btn small" data-action="regen-choice-partial" type="button">前の配車表を部分修正</button>
         </div>
       </div>
     </div>` : ''}
@@ -4131,10 +4538,12 @@ function renderRegister(){
   state.families.forEach(f=>{
     const a=attendanceFor(d.attendance, f);
     if (!a || a.localArrival || a.absentAll) return;
-    if (f.father && a.father) familyRidePeople++;
-    if (f.mother && a.mother) familyRidePeople++;
+    if (!a.parentsDirect){
+      if (f.father && a.father && a.soloRole!=='father') familyRidePeople++;
+      if (f.mother && a.mother && a.soloRole!=='mother') familyRidePeople++;
+    }
     (f.players||[]).forEach((pp,i)=>{ if(a.players && a.players['p'+i]) familyRidePeople++; });
-    (f.others||[]).forEach((oo,i)=>{ if(a.others && a.others['o'+i]) familyRidePeople++; });
+    if (!a.parentsDirect) (f.others||[]).forEach((oo,i)=>{ if(a.others && a.others['o'+i]) familyRidePeople++; });
   });
   let staffRidePeople = 0;
   state.staff.forEach(st=>{
@@ -4157,6 +4566,44 @@ function renderRegister(){
   const officerFamilies = state.families.filter(f=>f.vehicleRoles.officer);
   const equipFamilies = state.families.filter(f=>f.vehicleRoles.equipment);
 
+  // 個別の別行動（イレギュラー）：保護者の一方だけが現地集合解散（途中参加）する場合の入力欄
+  const soloTemp = state.tempSolo || {fid:'', role:''};
+  const soloEligible = state.families.filter(f=>{
+    const a = attendanceFor(d.attendance, f);
+    return a && !a.absentAll && !a.localArrival && !a.parentsDirect && (f.father || f.mother);
+  });
+  const soloTempFam = soloEligible.find(f=>familyIdentity(f)===soloTemp.fid);
+  const soloEntries = state.families.filter(f=>{
+    const a = attendanceFor(d.attendance, f);
+    return a && a.soloRole && !a.localArrival && !a.absentAll && !a.parentsDirect && f[a.soloRole];
+  });
+  const soloNoReason = soloEntriesWithoutReason(d);
+  const soloSectionHtml = `
+    <div class="solo-box" style="margin-top:12px;padding:10px 12px;border:1px solid var(--paper-line);border-radius:6px;background:var(--surface);">
+      <div style="font-weight:700;margin-bottom:4px;">個別の別行動</div>
+      ${soloNoReason.length ? `<div class="warn-box" style="margin:0 0 8px;"><b>理由が未入力です</b>${soloNoReason.map(n=>'・'+escapeHtml(n)).join('<br>')}<br>理由を入力するまで「登録完了」は押せません。</div>` : ''}
+      <p class="small-muted" style="margin:0 0 8px;">保護者の一方だけが、別の車で現地に直接向かう場合（仕事で午後から参加など）に使います。「家庭 → 人 → 現地集合解散」の順に選んで追加してください。保護者の全員が別行動の場合は、各家庭の「保護者は現地集合解散」を使います。</p>
+      ${soloEntries.length ? `<div style="margin-bottom:8px;">${soloEntries.map(f=>{
+        const a = attendanceFor(d.attendance, f);
+        return `<div class="attend-row" style="margin-bottom:4px;"><span>${escapeHtml(f.surname)}　${soloRoleText(a.soloRole)}：現地集合解散（途中参加）</span><button class="btn ghost small" type="button" data-action="solo-remove" data-family-id="${escapeHtml(f.id)}">解除</button></div>
+        <div class="attend-row" style="margin:0 0 4px 12px;"><span class="small-muted">理由（Excelのみ）：</span><input type="text" maxlength="30" data-action="att-local-reason" data-family-id="${escapeHtml(f.id)}" value="${escapeHtml(a.localReason||'')}" placeholder="例：仕事のため午後から参加" style="flex:1;min-width:160px;"></div>
+`;
+      }).join('')}</div>` : ''}
+      <div class="attend-row">
+        <select data-action="solo-family" style="width:auto;">
+          <option value="">家庭を選択</option>
+          ${soloEligible.map(f=>`<option value="${escapeHtml(familyIdentity(f))}" ${soloTemp.fid===familyIdentity(f)?'selected':''}>${escapeHtml(f.surname)}家</option>`).join('')}
+        </select>
+        <select data-action="solo-role" style="width:auto;" ${soloTempFam?'':'disabled'}>
+          <option value="">人を選択</option>
+          ${soloTempFam && soloTempFam.father ? `<option value="father" ${soloTemp.role==='father'?'selected':''}>父：${escapeHtml(soloTempFam.father.name)}</option>` : ''}
+          ${soloTempFam && soloTempFam.mother ? `<option value="mother" ${soloTemp.role==='mother'?'selected':''}>母：${escapeHtml(soloTempFam.mother.name)}</option>` : ''}
+        </select>
+        <span class="small-muted">現地集合解散（途中参加）</span>
+        <button class="btn small" type="button" data-action="solo-add">追加</button>
+      </div>
+    </div>`;
+
   const famBlocks = state.families.map(f=>{
     const a = attendanceFor(d.attendance, f);
     const playersHtml = (f.players||[]).map((p,i)=>{
@@ -4169,10 +4616,10 @@ function renderRegister(){
       return `<label class="chk"><input type="checkbox" data-action="att-other" data-family-id="${escapeHtml(f.id)}" data-ok="${k}" ${checked?'checked':''}> ${escapeHtml(o.name)}${o.relation?('（'+escapeHtml(o.relation)+'）'):''}<span class="small-muted">・兄弟姉妹</span></label>`;
     }).join('');
 
-    const canDispatchPossible = (f.father && a.father) || (f.mother && a.mother);
+    const canDispatchPossible = (f.father && a.father && a.soloRole!=='father') || (f.mother && a.mother && a.soloRole!=='mother');
     const driverOptions = `
-      ${f.father && a.father ? `<option value="father" ${a.driver==='father'?'selected':''}>父：${escapeHtml(f.father.name)}</option>`:''}
-      ${f.mother && a.mother ? `<option value="mother" ${a.driver==='mother'?'selected':''}>母：${escapeHtml(f.mother.name)}</option>`:''}
+      ${f.father && a.father && a.soloRole!=='father' ? `<option value="father" ${a.driver==='father'?'selected':''}>父：${escapeHtml(f.father.name)}</option>`:''}
+      ${f.mother && a.mother && a.soloRole!=='mother' ? `<option value="mother" ${a.driver==='mother'?'selected':''}>母：${escapeHtml(f.mother.name)}</option>`:''}
     `;
     const isAbsentAll = !!a.absentAll;
     const isOpen = state.famOpen[familyIdentity(f)] === true;
@@ -4195,8 +4642,10 @@ function renderRegister(){
       if (totalPlayers) parts.push(`選手${presentPlayers}/${totalPlayers}名`);
       if (totalOthers) parts.push(`兄弟姉妹${presentOthers}/${totalOthers}名`);
       summary = parts.length ? parts.join('　') : '参加者なし';
+      if (a.soloRole && !a.localArrival && !a.parentsDirect) summary += `　${soloRoleText(a.soloRole)}のみ途中参加`;
       if (a.localArrival) summary += '　現地集合';
-      else if (a.pickupByOther) summary += '　他家族の送迎';
+      else if (a.parentsDirect) summary += '　選手のみ配車（保護者は現地集合解散）';
+      else if (a.pickupByOther) summary += '　送迎あり（留め置き不要）';
       else if (a.canDispatch) summary += `　配車可（${a.driver==='father'?'父':a.driver==='mother'?'母':'運転手未選択'}）`;
     }
 
@@ -4219,22 +4668,39 @@ function renderRegister(){
         <label class="chk" style="font-weight:700;color:var(--red);"><input type="checkbox" data-action="att-absent-all" data-family-id="${escapeHtml(f.id)}" ${isAbsentAll?'checked':''}> 今回は家族全員欠席（保護者・選手とも）</label>
         ${!isAbsentAll ? `<label class="chk"><input type="checkbox" data-action="att-local" data-family-id="${escapeHtml(f.id)}" ${a.localArrival?'checked':''}> 現地集合・解散（配車不要）</label>` : ''}
       </div>
+      ${(!isAbsentAll && (a.localArrival || a.parentsDirect)) ? `
+      <div class="attend-row" style="margin-bottom:8px;">
+        <span class="small-muted">現地集合解散の理由（Excel出力のみに表示）：</span>
+        <input type="text" maxlength="30" data-action="att-local-reason" data-family-id="${escapeHtml(f.id)}" value="${escapeHtml(a.localReason||'')}" placeholder="例：仕事のため午後から参加" style="flex:1;min-width:180px;">
+        ${a.localReason && a.localReason.trim() ? '' : '<span class="small-muted" style="color:var(--red);">未入力</span>'}
+      </div>` : ''}
       ${isAbsentAll ? `
       <p class="small-muted" style="margin:0;">家族全員が欠席として登録されています。参加する場合はチェックを外してください。</p>
       ` : `
       <div class="attend-row">
         <span class="small-muted">参加：</span>
-        ${f.father?`<label class="chk"><input type="checkbox" data-action="att-parent" data-family-id="${escapeHtml(f.id)}" data-role="father" ${a.father?'checked':''}> 父（${escapeHtml(f.father.name)}）</label>`:''}
-        ${f.mother?`<label class="chk"><input type="checkbox" data-action="att-parent" data-family-id="${escapeHtml(f.id)}" data-role="mother" ${a.mother?'checked':''}> 母（${escapeHtml(f.mother.name)}）</label>`:''}
+        ${(f.father && !a.parentsDirect)?`<label class="chk"><input type="checkbox" data-action="att-parent" data-family-id="${escapeHtml(f.id)}" data-role="father" ${a.father?'checked':''}> 父（${escapeHtml(f.father.name)}）</label>`:''}
+        ${(f.mother && !a.parentsDirect)?`<label class="chk"><input type="checkbox" data-action="att-parent" data-family-id="${escapeHtml(f.id)}" data-role="mother" ${a.mother?'checked':''}> 母（${escapeHtml(f.mother.name)}）</label>`:''}
         ${playersHtml}
-        ${othersHtml}
+        ${a.parentsDirect ? '' : othersHtml}
       </div>
-      ${othersHtml ? `<p class="small-muted" style="margin:2px 0 0;">※兄弟姉妹は、必ず父または母のどちらかと同じ車に同乗します（保護者のみ・兄弟姉妹のみでの乗車はできません）。</p>` : ''}
+      ${(othersHtml && !a.parentsDirect) ? `<p class="small-muted" style="margin:2px 0 0;">※兄弟姉妹は、必ず父または母のどちらかと同じ車に同乗します（保護者のみ・兄弟姉妹のみでの乗車はできません）。</p>` : ''}
+      ${(a.soloRole && !a.localArrival && !a.parentsDirect) ? `<p class="small-muted" style="margin:2px 0 0;">※${soloRoleText(a.soloRole)}は途中参加（現地集合解散）として登録されています。ほかの家族は通常どおり配車に乗ります。解除は下の「個別の別行動」欄で行います。${(a.canDispatch && !a.driver) ? `<br><b style="color:var(--red);">${soloRoleText(a.soloRole)}は車出しできません。${a.soloRole==='father'?'母':'父'}が運転できる場合は、運転手を選んでください。</b>` : ''}</p>` : ''}
       ${!a.localArrival ? `
       <div class="attend-row">
-        <label class="chk"><input type="checkbox" data-action="att-pickup" data-family-id="${escapeHtml(f.id)}" ${a.pickupByOther?'checked':''}> 集合場所まで、他のご家族に送迎してもらう（この家庭の車は留め置き不要）</label>
+        <label class="chk"><input type="checkbox" data-action="att-pickup" data-family-id="${escapeHtml(f.id)}" ${a.pickupByOther?'checked':''}> 集合場所まで送迎（留め置き不要）</label>
       </div>
-      ${!a.pickupByOther ? `
+      ${a.pickupByOther ? `
+      <div class="attend-row" style="margin-left:18px;">
+        <label class="chk"><input type="checkbox" data-action="att-parents-direct" data-family-id="${escapeHtml(f.id)}" ${a.parentsDirect?'checked':''}> 保護者は現地集合解散（選手のみ配車に乗る）</label>
+      </div>
+      ${a.parentsDirect ? `
+      <div class="attend-row" style="margin-left:18px;">
+        <span class="small-muted">保護者の人数：</span>
+        <input type="number" min="0" max="9" inputmode="numeric" data-action="att-parents-direct-count" data-family-id="${escapeHtml(f.id)}" value="${a.parentsDirectCount>0 ? a.parentsDirectCount : ''}" placeholder="人数" style="width:68px;"> <span class="small-muted">名（誰が、ではなく人数だけ入力）</span>
+      </div>
+      <p class="small-muted" style="margin:2px 0 0 18px;">保護者の参加（父・母）にかかわらず、この家庭は現地集合・解散の車として登録され、選手だけが配車に乗ります。</p>` : ''}
+      ` : `
       <div class="dispatch-row">
         <label class="chk"><input type="checkbox" data-action="att-dispatch" data-family-id="${escapeHtml(f.id)}" ${a.canDispatch?'checked':''} ${canDispatchPossible?'':'disabled'}> 配車（車出し）可能</label>
         ${a.canDispatch ? `
@@ -4245,7 +4711,7 @@ function renderRegister(){
           </select>
           <span class="small-muted">定員 ${f.capacity}名</span>
         ` : ''}
-      </div>` : ''}
+      </div>`}
       ` : ''}
       `}
       </div>
@@ -4468,8 +4934,9 @@ function renderRegister(){
         <div class="list-box">
         ${famBlocks}
         </div>
+        ${soloSectionHtml}
         <div class="row-actions" style="margin-top:10px;">
-          <button class="btn small" data-action="complete-family-registration" type="button">登録完了</button>
+          <button class="btn small" data-action="complete-family-registration" type="button" id="btn-complete-family" ${soloNoReason.length?'disabled style="opacity:.45;cursor:not-allowed;"':''}>登録完了</button>
         </div>
       `}
     ` : `
@@ -4659,6 +5126,11 @@ function handleClick(e){
     return;
   }
   if (action==='complete-family-registration'){
+    const noReason = soloEntriesWithoutReason(state.draft);
+    if (noReason.length){
+      alert('個別の別行動の理由が未入力のため、登録完了にできません。\n\n' + noReason.map(n=>'・'+n).join('\n') + '\n\n「個別の別行動」欄で、理由を入力してください。');
+      return;
+    }
     if (!state.draft) return;
     const d = state.draft;
     // 配車（車出し）可能にチェックが入っているのに運転手が未選択の家庭があれば、
@@ -4780,6 +5252,30 @@ function handleClick(e){
     render();
     return;
   }
+  if (action==='solo-add' || action==='solo-remove'){
+    const d = state.draft;
+    if (!d) return;
+    d.familyRegistrationCompleted = false;
+    if (action==='solo-remove'){
+      const a = d.attendance[el.dataset.familyId];
+      if (a){ a.soloRole = null; a.soloHeldBack = false; }
+      render(); return;
+    }
+    const ts = state.tempSolo || {fid:'', role:''};
+    const fam = familyBySurname(ts.fid);
+    if (!fam || !ts.role || !fam[ts.role]){ alert('家庭と人（父・母）を選んでから「追加」を押してください。'); return; }
+    const familyId = familyIdentity(fam);
+    const a = d.attendance[familyId];
+    if (!a) return;
+    a.soloRole = ts.role;
+    a[ts.role] = true; // 別行動の人も参加者として扱う（乗車・車出しはしない）
+    if (a.driver === ts.role) a.driver = null;
+    d.extraCars.forEach(ec=>{
+      if ((ec.familyId === familyId || (!ec.familyId && ec.familySurname === fam.surname)) && ec.driver === ts.role) ec.driver = null;
+    });
+    state.tempSolo = null;
+    render(); return;
+  }
   if (action==='toggle-fam-block'){
     const familyId = el.dataset.familyId;
     state.famOpen[familyId] = !state.famOpen[familyId];
@@ -4790,6 +5286,15 @@ function handleClick(e){
     if (!state.draft) return;
     state.draft.staffSectionOpen = state.draft.staffSectionOpen === false;
     render();
+    return;
+  }
+  if (action==='regen-choice-cancel' || action==='regen-choice-new' || action==='regen-choice-partial'){
+    const c = state.regenChoice;
+    state.regenChoice = null;
+    if (!c){ render(); return; }
+    if (action==='regen-choice-partial') c.onPartial();
+    else if (action==='regen-choice-new') c.onNew();
+    else render();
     return;
   }
   if (action==='confirm-ok'){
@@ -5053,16 +5558,36 @@ function handleClick(e){
       state.activeTab = 'assignment';
       render();
     };
-    if (d.result && d.manualAssignmentEditsPending){
-      // ③配車表で手動修正した内容がある状態で、②から自動配車を作り直そうとしている。
-      // 気づかないまま手動修正が失われないよう、必ず確認する。
-      askConfirm(
-        '③配車表で、乗車先の手動修正など変更を加えています。\nここで自動配車を新しく作成すると、その修正内容は失われます（作成後は「アンドゥ」で直前の内容に戻すことができます）。\n\n新しく自動配車を作成しますか？',
-        doGenerate
-      );
+    const generateNew = ()=>{
+      if (d.result && d.manualAssignmentEditsPending){
+        // ③配車表で手動修正した内容がある状態で、②から自動配車を作り直そうとしている。
+        // 気づかないまま手動修正が失われないよう、必ず確認する。
+        askConfirm(
+          '③配車表で、乗車先の手動修正など変更を加えています。\nここで自動配車を新しく作成すると、その修正内容は失われます（作成後は「アンドゥ」で直前の内容に戻すことができます）。\n\n新しく自動配車を作成しますか？',
+          doGenerate
+        );
+        return;
+      }
+      doGenerate();
+    };
+    if (d.result && d.result.cars && d.result.cars.length){
+      // 配車表がすでにある場合は、「新しく自動配車を作る」か「前の配車表を部分修正する」かを選べる。
+      const rec = reconcileAssignment(d);
+      state.regenChoice = {
+        message: rec.message,
+        onPartial: ()=>{
+          pushAssignmentUndo('②の内容を変更して配車表を部分修正する前');
+          d.result = rec.result;
+          d.manualAssignmentEditsPending = true; // 純粋な自動配車ではなくなるため、以後の作り直しでは確認を出す
+          state.activeTab = 'assignment';
+          render();
+        },
+        onNew: generateNew,
+      };
+      render();
       return;
     }
-    doGenerate();
+    generateNew();
     return;
   }
   if (action==='auto-select-households'){
@@ -5082,7 +5607,7 @@ function handleClick(e){
 使用上限：${target}台
 
 輪番上の優先順（配車回数が少ない順）：
-${ranked.map((sn,i)=>`${i+1}. ${sn}家（過去${(rotation[sn]||{}).count||0}回）`).join('\n')}
+${ranked.map((sn,i)=>`${i+1}. ${(familyBySurname(sn)||{}).surname||sn}家（過去${(rotation[sn]||{}).count||0}回）`).join('\n')}
 
 ※ここでは候補登録は変更しません。実際の使用車は配車作成時に絶対条件も含めて決定します。`);
     return;
@@ -5618,6 +6143,20 @@ function handleChange(e){
     state.tempFamily[el.dataset.field] = el.checked;
     return;
   }
+  if (action==='solo-held'){
+    const a = state.draft && state.draft.attendance[el.dataset.familyId];
+    if (a){ a.soloHeldBack = el.checked; state.draft.familyRegistrationCompleted = false; }
+    return;
+  }
+  if (action==='solo-family'){
+    state.tempSolo = {fid: el.value, role: ''};
+    render(); return;
+  }
+  if (action==='solo-role'){
+    if (!state.tempSolo) state.tempSolo = {fid:'', role:''};
+    state.tempSolo.role = el.value;
+    return;
+  }
   if (action==='car-swap-select-out'){
     if (!state.tempCarSwap) state.tempCarSwap = {outId:'', inId:''};
     state.tempCarSwap.outId = el.value;
@@ -5635,6 +6174,7 @@ function handleChange(e){
     const savedScrollY = window.scrollY || window.pageYOffset || 0;
     markFamilyEditing();
     d.attendance[el.dataset.familyId][el.dataset.role] = el.checked;
+    if (!el.checked && d.attendance[el.dataset.familyId].soloRole===el.dataset.role) d.attendance[el.dataset.familyId].soloRole = null; // 参加を外したら別行動の設定も解除
     if (!el.checked && d.attendance[el.dataset.familyId].driver===el.dataset.role){
       d.attendance[el.dataset.familyId].driver = null;
     }
@@ -5677,6 +6217,8 @@ function handleChange(e){
       a.driver = null;
       a.localArrival = false;
       a.pickupByOther = false;
+      a.parentsDirect = false;
+      a.soloRole = null;
       a.absentAll = true;
     } else {
       a.absentAll = false;
@@ -5697,6 +6239,8 @@ function handleChange(e){
     const surname = fam ? fam.surname : '';
     d.attendance[familyId].localArrival = el.checked;
     if (el.checked){
+      d.attendance[familyId].soloRole = null; // 家族全員が現地集合のため、個別の別行動は解除
+      d.attendance[familyId].parentsDirect = false; // 家族全員が現地集合のため、イレギュラー（選手のみ配車）は解除
       // 現地集合・解散＝配車メンバーには入らないため、配車可否・運転手の指定を自動で外す
       d.attendance[familyId].canDispatch = false;
       d.attendance[familyId].driver = null;
@@ -5714,10 +6258,50 @@ function handleChange(e){
     const fam = familyById(familyId);
     const surname = fam ? fam.surname : '';
     d.attendance[familyId].pickupByOther = el.checked;
+    if (!el.checked) d.attendance[familyId].parentsDirect = false; // 送迎なしに戻したら、直行直帰の設定も解除
     if (el.checked){
       // 他のご家族が集合場所まで送迎してくれるため、この家庭の車は今回使わない
       d.attendance[familyId].canDispatch = false;
       d.attendance[familyId].driver = null;
+      d.extraCars.forEach(ec=>{
+        if (ec.familyId === familyId || (!ec.familyId && ec.familySurname === surname)){ ec.familyId = null; ec.familySurname = null; ec.driver = null; }
+      });
+    }
+    render(); return;
+  }
+  if (action==='att-local-reason'){
+    const a = state.draft && state.draft.attendance[el.dataset.familyId];
+    if (!a) return;
+    const warnShown = !!document.querySelector('.solo-box .warn-box');
+    a.localReason = String(el.value||'').trim().slice(0,30);
+    if (warnShown !== (soloEntriesWithoutReason(state.draft).length > 0)) render(); // 未入力の注意表示を更新する
+    return;
+  }
+  if (action==='att-parents-direct-count'){
+    markFamilyEditing();
+    const a = d.attendance[el.dataset.familyId];
+    if (!a) return;
+    const n = parseInt(el.value, 10);
+    a.parentsDirectCount = (isFinite(n) && n > 0) ? Math.min(n, 9) : 0;
+    return; // 入力中の再描画で入力欄のフォーカスが外れないよう、再描画はしない
+  }
+  if (action==='att-parents-direct'){
+    markFamilyEditing();
+    const familyId = el.dataset.familyId;
+    const fam = familyById(familyId);
+    const surname = fam ? fam.surname : '';
+    const a = d.attendance[familyId];
+    a.parentsDirect = !!(el.checked && a.pickupByOther);
+    if (a.parentsDirect){
+      a.soloRole = null; // 保護者全員が別行動のため、個別の別行動は解除
+      // 人数の初期値：参加にチェック済みの保護者の人数。なければ登録済みの保護者の人数（あとから変更できる）
+      if (!(a.parentsDirectCount > 0)){
+        const checkedN = (fam && fam.father && a.father ? 1 : 0) + (fam && fam.mother && a.mother ? 1 : 0);
+        const registeredN = (fam && fam.father ? 1 : 0) + (fam && fam.mother ? 1 : 0);
+        a.parentsDirectCount = checkedN || registeredN || 1;
+      }
+      // 保護者は車を出さないため、配車可否・運転手の指定と、役員・指導者車／用具車の担当指定を外す
+      a.canDispatch = false; a.driver = null;
       d.extraCars.forEach(ec=>{
         if (ec.familyId === familyId || (!ec.familyId && ec.familySurname === surname)){ ec.familyId = null; ec.familySurname = null; ec.driver = null; }
       });
@@ -5933,6 +6517,20 @@ function handleInput(e){
   const action = el.dataset.action;
   if (action==='draft-field'){
     state.draft[el.dataset.field] = el.value;
+    return;
+  }
+  if (action==='att-local-reason'){
+    // 入力のたびに理由を保存し、「登録完了」ボタンの有効・無効だけを再描画せずに切り替える
+    const a = state.draft && state.draft.attendance[el.dataset.familyId];
+    if (!a) return;
+    a.localReason = String(el.value||'').trim().slice(0,30);
+    const btn = document.getElementById('btn-complete-family');
+    if (btn){
+      const none = soloEntriesWithoutReason(state.draft).length > 0;
+      btn.disabled = none;
+      btn.style.opacity = none ? '.45' : '';
+      btn.style.cursor = none ? 'not-allowed' : '';
+    }
     return;
   }
   if (action==='target-count-field'){
