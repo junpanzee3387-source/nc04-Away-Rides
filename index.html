@@ -64,8 +64,16 @@ h3{margin:0 0 8px;font-size:13px;color:var(--sub)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 label{font-size:12px;color:var(--sub);display:block}
 input,select{font:inherit;width:100%;padding:9px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
-.chip{padding:8px 10px;border-radius:10px;border:2px solid var(--line);text-align:center;font-weight:700;cursor:pointer;user-select:none}
-.chip small{display:block;font-size:10px;font-weight:400}.st0{opacity:.45}.st1{border-color:var(--accent)}.st2{background:var(--accent);color:#fff;border-color:var(--accent)}
+.chip{--pc:var(--accent);padding:8px 10px;border-radius:10px;border:2px solid var(--line);text-align:center;font-weight:700;cursor:pointer;user-select:none}
+.chip small{display:block;font-size:10px;font-weight:400}.st0{opacity:.45}.st1{border-color:var(--pc)}.st2{background:var(--pc);color:#fff;border-color:var(--pc)}
+/* 登録選手の学年色（3色で循環）：0＝ブルー（従来色）／1＝オレンジ／2＝パープル */
+:root{--g0:#1f5fbf;--g1:#d96c00;--g2:#8e44ad}
+:root[data-theme="dark"]{--g0:#2f6fcf;--g1:#d96c00;--g2:#8e44ad}
+.gc0{--pc:var(--g0)}.gc1{--pc:var(--g1)}.gc2{--pc:var(--g2)}
+.gsw{width:34px;height:34px;min-height:0;padding:0;border-radius:50%;border:3px solid var(--line);background:var(--pc);flex:0 0 auto}
+.gsel{display:flex;gap:8px;margin-top:6px}
+.gsel button{flex:1;min-height:40px;padding:6px;border:3px solid var(--line);background:var(--pc);color:#fff;font-size:13px}
+.gsel button.on{border-color:var(--ink)}
 .lrow{display:grid;grid-template-columns:24px 160px 1fr;gap:8px;align-items:center;margin-bottom:6px}
 .coldrow{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;font-size:13px}
 .coldrow input{width:64px}
@@ -772,6 +780,8 @@ table.fsb .fs-none{color:var(--sub);opacity:.45;font-weight:400}
     <label>背番号（1〜99）<input id="ap_no" type="number" min="1" max="99" inputmode="numeric" onkeydown="if(event.key==='Enter'){event.preventDefault();addPlayerOk()}"></label>
     <label>名前（苗字など。8文字まで）<input id="ap_name" maxlength="8" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();addPlayerOk()}"></label>
   </div>
+  <div style="font-size:12px;color:var(--sub);margin-top:8px">名前の色（学年ごとに色分け）</div>
+  <div class="gsel" id="ap_g"></div>
   <div style="font-size:12px;color:var(--sub);margin-top:6px">追加した選手は、この端末に保存され、今後の試合でも選べます。追加直後は「ベンチ入り」の状態になります（タップで切り替えできます）。</div>
   <div id="ap_err" style="color:#d33;font-weight:700;font-size:13px;min-height:1.2em;margin-top:6px;white-space:pre-line"></div>
   <div class="bar"><button onclick="$('addPlayerModal').classList.add('hide')">キャンセル</button><button class="ok" onclick="addPlayerOk()">追加する</button></div>
@@ -782,6 +792,8 @@ table.fsb .fs-none{color:var(--sub);opacity:.45;font-weight:400}
     <label>背番号（1〜99）<input id="ep_no" type="number" min="1" max="99" inputmode="numeric" onkeydown="if(event.key==='Enter'){event.preventDefault();editPlayerOk()}"></label>
     <label>名前（8文字まで）<input id="ep_name" maxlength="8" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();editPlayerOk()}"></label>
   </div>
+  <div style="font-size:12px;color:var(--sub);margin-top:8px">名前の色（学年ごとに色分け）</div>
+  <div class="gsel" id="ep_g"></div>
   <div style="font-size:12px;color:var(--sub);margin-top:6px">名前だけを直した場合は、過去の履歴でも同じ背番号の名前が新しい名前で表示されます。背番号を変えた場合は、過去の履歴には変更前の背番号・名前がそのまま残ります。</div>
   <div id="ep_err" style="color:#d33;font-weight:700;font-size:13px;min-height:1.2em;margin-top:6px;white-space:pre-line"></div>
   <div class="bar"><button onclick="$('editPlayerModal').classList.add('hide')">キャンセル</button><button class="ok" onclick="editPlayerOk()">変更する</button></div>
@@ -1864,7 +1876,7 @@ function openSetup(){
 function closeSetup(){showPhase(F.phase);}
 function drawSetup(){
   const S=game.S,ns=Object.keys(MASTER);
-  $('s_p').innerHTML=ns.map(n=>`<div class="chip st${S.st[n]}" onclick="cyc(${n})">${dispNo(n)} ${MASTER[n]}<small>${['－','参加','ベンチ入り'][S.st[n]]}</small></div>`).join('');
+  $('s_p').innerHTML=ns.map(n=>`<div class="chip st${S.st[n]} gc${gradeOf(n)}" onclick="cyc(${n})">${dispNo(n)} ${MASTER[n]}<small>${['－','参加','ベンチ入り'][S.st[n]]}</small></div>`).join('');
   {const cntAttend=ns.filter(n=>S.st[n]>0).length,cntBench=ns.filter(n=>S.st[n]==2).length,cntNone=ns.filter(n=>S.st[n]==0).length;
    $('s_pcount').textContent=`登録選手：${ns.length}名（ベンチ入り：${cntBench}名／参加：${cntAttend-cntBench}名／不参加：${cntNone}名）`;}
   const battingPos=game.dh?POS.filter(p=>p!=='投').concat(['指']):POS;
@@ -1886,7 +1898,17 @@ function drawSetup(){
   }
 }
 /* ---- 選手の追加（登録シート） ---- */
-function openAddPlayer(){
+/* ---- 学年色（0=ブルー／1=オレンジ／2=パープル）：背番号ごとにこの端末へ保存。未設定は0（従来のブルー） ---- */
+const GRADE_KEY='yb_grade',GRADE_NAMES=['ブルー','オレンジ','パープル'];
+function loadGrades(){let g={};try{g=JSON.parse(localStorage.getItem(GRADE_KEY)||'{}')||{};}catch(e){g={};}return g;}
+function gradeOf(n){const v=+loadGrades()[n];return(v===1||v===2)?v:0;}
+function setGrade(n,v){const g=loadGrades();if(v)g[n]=v;else delete g[n];try{localStorage.setItem(GRADE_KEY,JSON.stringify(g));}catch(e){}}
+function cycGrade(n){setGrade(n,(gradeOf(n)+1)%3);drawSetup();drawManageList();}
+function gradeBtns(id,cur,fn){$(id).innerHTML=[0,1,2].map(v=>`<button type="button" class="gc${v}${v===cur?' on':''}" onclick="${fn}(${v})">${GRADE_NAMES[v]}</button>`).join('');}
+let apGrade=0;
+function apSetGrade(v){apGrade=v;gradeBtns('ap_g',v,'apSetGrade');}
+function epSetGrade(v){if(editingNo==null)return;setGrade(editingNo,v);gradeBtns('ep_g',v,'epSetGrade');drawSetup();drawManageList();}
+function openAddPlayer(){apSetGrade(0);
   $('ap_no').value='';$('ap_name').value='';$('ap_err').textContent='';
   $('addPlayerModal').classList.remove('hide');
   setTimeout(()=>{try{$('ap_no').focus()}catch(e){}},50);
@@ -1904,7 +1926,7 @@ function addPlayerOk(){
       localStorage.setItem(EXTRA_KEY,JSON.stringify(l));
       localStorage.setItem(REMOVED_KEY,JSON.stringify(loadRemovedPlayers().filter(x=>+x.no!==no))); /* 削除済みだった背番号を再び使う */
     }catch(e){err('保存に失敗しました。\nブラウザの保存領域をご確認ください。');return;}
-    delete MASTER_ARCHIVE[no];MASTER_ACTIVE[no]=name;
+    delete MASTER_ARCHIVE[no];MASTER_ACTIVE[no]=name;setGrade(no,apGrade);
     game.S.st[no]=2; /* 追加直後は「ベンチ入り」（初期状態と同じ） */
     $('addPlayerModal').classList.add('hide');
     if(game.official)drawNumOverride();
@@ -1923,7 +1945,7 @@ function openManagePlayers(){drawManageList();$('managePlayerModal').classList.r
 function drawManageList(){
   const el=$('mp_list');if(!el)return;
   const ns=Object.keys(MASTER);
-  el.innerHTML=ns.length?ns.map(n=>`<div class="histrow"><span>${n}　${MASTER[n]}</span><span style="display:flex;gap:6px"><button onclick="editPlayer(${n})">編集</button><button onclick="removePlayer(${n})">削除</button></span></div>`).join(''):'<small>登録選手がいません。「＋ 選手を追加」または「読み込み」で登録してください。</small>';
+  el.innerHTML=ns.length?ns.map(n=>`<div class="histrow"><span style="display:flex;align-items:center;gap:8px"><button class="gsw gc${gradeOf(n)}" onclick="cycGrade(${n})" aria-label="名前の色を切り替え"></button>${n}　${MASTER[n]}</span><span style="display:flex;gap:6px"><button onclick="editPlayer(${n})">編集</button><button onclick="removePlayer(${n})">削除</button></span></div>`).join(''):'<small>登録選手がいません。「＋ 選手を追加」または「読み込み」で登録してください。</small>';
 }
 /* 削除した番号の後始末：いまの登録シート（状態・打順・投手・公式戦背番号）から外す */
 function clearFromSetup(n){
@@ -1951,7 +1973,7 @@ function removePlayer(n){
 let editingNo=null;
 function editPlayer(n){
   if(MASTER_ACTIVE[n]==null)return;
-  editingNo=n;$('ep_no').value=n;$('ep_name').value=MASTER_ACTIVE[n];$('ep_err').textContent='';
+  editingNo=n;gradeBtns('ep_g',gradeOf(n),'epSetGrade');$('ep_no').value=n;$('ep_name').value=MASTER_ACTIVE[n];$('ep_err').textContent='';
   $('editPlayerModal').classList.remove('hide');
   setTimeout(()=>{try{$('ep_name').focus();$('ep_name').select()}catch(e){}},50);
 }
@@ -1972,6 +1994,7 @@ function editPlayerOk(){
     try{localStorage.setItem(EXTRA_KEY,JSON.stringify(ex));localStorage.setItem(REMOVED_KEY,JSON.stringify(rm));}
     catch(e){err('保存に失敗しました。\nブラウザの保存領域をご確認ください。');return;}
     if(nn!==old){
+      setGrade(nn,gradeOf(old));setGrade(old,0);
       const S=game.S;
       delete MASTER_ACTIVE[old];MASTER_ARCHIVE[old]=oldName;delete MASTER_ARCHIVE[nn];
       S.st[nn]=S.st[old];delete S.st[old];
